@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "properties": {
+    "subtopic": {
+      "type": "string",
+      "description": "The narrow subtopic that was analyzed."
+    },
+    "analysis": {
+      "type": "string",
+      "description": "Detailed analysis of the subtopic."
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "detail": { "type": "string" },
+          "source": { "type": "string" }
+        },
+        "required": ["detail", "source"]
+      }
+    }
+  },
+  "required": ["subtopic", "analysis"]
+}

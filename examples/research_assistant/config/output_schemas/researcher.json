@@ -1,0 +1,29 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "2-3 sentence overview of research findings."
+    },
+    "key_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "finding": { "type": "string" },
+          "source": { "type": "string" }
+        },
+        "required": ["finding", "source"]
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "recommendations": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "required": ["summary", "key_findings"]
+}

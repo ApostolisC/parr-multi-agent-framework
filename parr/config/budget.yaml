@@ -1,0 +1,23 @@
+# =============================================================================
+# Budget Defaults & Phase Iteration Limits
+# =============================================================================
+# Global defaults for all workflows. Can be overridden per-workflow via
+# the budget parameter in start_workflow().
+# =============================================================================
+
+budget_defaults:
+  max_tokens: 200000        # Total token ceiling per workflow
+  max_cost: 10.0            # Dollar ceiling per workflow
+  max_duration_ms: 300000   # 5-minute wall-clock timeout
+  max_agent_depth: 3        # Max nesting depth for spawned agents
+  max_parallel_agents: 3    # Max concurrent child agents
+  max_sub_agents_total: 10  # Max total children a single agent can spawn
+  inherit_remaining: true   # Children inherit parent's remaining budget
+
+# Iteration limits per phase. Each iteration = one LLM call (any tool call).
+# Both domain and framework tool calls count toward these limits.
+phase_limits:
+  plan: 5
+  act: 15
+  review: 5
+  report: 5

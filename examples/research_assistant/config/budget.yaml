@@ -1,0 +1,16 @@
+# Budget for the research assistant example.
+
+budget_defaults:
+  max_tokens: 50000
+  max_cost: 1.0
+  max_duration_ms: 120000
+  max_agent_depth: 2
+  max_parallel_agents: 2
+  max_sub_agents_total: 3
+  inherit_remaining: true
+
+phase_limits:
+  plan: 5
+  act: 10
+  review: 3
+  report: 5

@@ -1,0 +1,25 @@
+# Roles for the research assistant example.
+# Demonstrates: single role, sub-role, tool binding, output schema.
+
+roles:
+  researcher:
+    model: gpt-4o-mini
+    description: "Researches a topic by searching documents and synthesizing findings."
+    system_prompt: system_prompts/researcher.md
+    report_template: report_templates/researcher.md
+    output_schema: output_schemas/researcher.json
+    tools:
+      - search_documents
+      - read_section
+    model_config:
+      temperature: 0.4
+      max_tokens: 4096
+
+    sub_roles:
+      deep_dive:
+        description: "Performs in-depth analysis on a narrow subtopic."
+        system_prompt: system_prompts/researcher__deep_dive.md
+        output_schema: output_schemas/researcher__deep_dive.json
+        model_config:
+          temperature: 0.3
+          max_tokens: 4096
