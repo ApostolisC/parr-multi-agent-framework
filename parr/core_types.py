@@ -217,6 +217,10 @@ class BudgetConfig:
     max_parallel_agents: int = 3
     max_sub_agents_total: int = 3  # Max total children a single agent can spawn
     inherit_remaining: bool = True
+    child_budget_fraction: float = 0.5  # Fraction of remaining budget for children
+    max_child_review_cycles: Optional[int] = None  # None = use parent's max_review_cycles
+    context_soft_compaction_pct: float = 0.40  # Fraction of context for soft compaction
+    context_hard_truncation_pct: float = 0.65  # Fraction of context for hard truncation
 
 
 @dataclass

@@ -12,8 +12,11 @@ Demonstrates:
 Run with:
     python -m examples.research_assistant.run
 
-Or with a real LLM (requires OPENAI_API_KEY):
+Or with a real LLM (requires providers.yaml + environment variables):
     python -m examples.research_assistant.run --live
+
+Override provider or model:
+    python -m examples.research_assistant.run --live --provider openai --model gpt-4o
 """
 
 from __future__ import annotations
@@ -23,7 +26,6 @@ import asyncio
 import json
 import logging
 import os
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -33,7 +35,7 @@ from parr import (
     Phase,
     ToolDef,
 )
-from parr.adapters import LoggingEventSink, create_tool_calling_llm
+from parr.adapters import LoggingEventSink
 from parr.config import load_config, create_orchestrator_from_config
 
 # ---------------------------------------------------------------------------
@@ -305,32 +307,40 @@ def _print_output(output: AgentOutput) -> None:
     print("=" * 70)
 
 
-async def run(live: bool = False) -> AgentOutput:
+async def run(
+    live: bool = False,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+) -> AgentOutput:
     """Run the research assistant example."""
     config_dir = Path(__file__).parent / "config"
 
-    # Build the LLM adapter
     if live:
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            print("Error: Set OPENAI_API_KEY environment variable for --live mode.")
-            sys.exit(1)
-        llm = create_tool_calling_llm("openai", model="gpt-4o-mini", api_key=api_key)
-        print("Using live OpenAI API")
+        # LLM is auto-created from providers.yaml + environment variables.
+        # provider/model overrides are passed through to the config loader.
+        orchestrator = create_orchestrator_from_config(
+            config_dir=config_dir,
+            tool_registry={
+                "search_documents": SEARCH_TOOL,
+                "read_section": READ_TOOL,
+            },
+            event_sink=LoggingEventSink(),
+            provider_override=provider,
+            model_override=model,
+        )
+        print("Using live LLM (provider from providers.yaml)")
     else:
         llm = _build_mock_llm()
         print("Using mock LLM (offline demo)")
-
-    # Build the orchestrator from config
-    orchestrator = create_orchestrator_from_config(
-        config_dir=config_dir,
-        tool_registry={
-            "search_documents": SEARCH_TOOL,
-            "read_section": READ_TOOL,
-        },
-        llm=llm,
-        event_sink=LoggingEventSink(),
-    )
+        orchestrator = create_orchestrator_from_config(
+            config_dir=config_dir,
+            tool_registry={
+                "search_documents": SEARCH_TOOL,
+                "read_section": READ_TOOL,
+            },
+            llm=llm,
+            event_sink=LoggingEventSink(),
+        )
 
     print(f"Starting workflow: 'Research AI in healthcare'")
     print("-" * 70)
@@ -347,14 +357,16 @@ async def run(live: bool = False) -> AgentOutput:
 
 def main():
     parser = argparse.ArgumentParser(description="Research Assistant — PARR Framework Example")
-    parser.add_argument("--live", action="store_true", help="Use real OpenAI API instead of mock LLM")
+    parser.add_argument("--live", action="store_true", help="Use real LLM via providers.yaml")
+    parser.add_argument("--provider", type=str, default=None, help="Override default_provider (e.g., openai, azure_openai, anthropic)")
+    parser.add_argument("--model", type=str, default=None, help="Override model name (e.g., gpt-4o, claude-3-5-sonnet)")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
 
     level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(level=level, format="%(levelname)-8s %(name)s: %(message)s")
 
-    asyncio.run(run(live=args.live))
+    asyncio.run(run(live=args.live, provider=args.provider, model=args.model))
 
 
 if __name__ == "__main__":

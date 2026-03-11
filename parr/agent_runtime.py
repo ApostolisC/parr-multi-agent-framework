@@ -49,10 +49,12 @@ from .core_types import (
     AgentNode,
     AgentOutput,
     AgentStatus,
+    BudgetConfig,
     ErrorEntry,
     ErrorSource,
     ExecutionMetadata,
     Phase,
+    StallDetectionConfig,
     ToolCall,
     ToolDef,
     ToolResult,
@@ -88,6 +90,8 @@ class AgentRuntime:
         available_roles_description: str = "",
         report_template_handler: Optional[Callable] = None,
         stream: bool = False,
+        stall_config: Optional[StallDetectionConfig] = None,
+        budget_config: Optional[BudgetConfig] = None,
     ) -> None:
         self._llm = llm
         self._budget_tracker = budget_tracker
@@ -97,6 +101,8 @@ class AgentRuntime:
         self._available_roles_description = available_roles_description
         self._report_template_handler = report_template_handler
         self._stream = stream
+        self._stall_config = stall_config
+        self._budget_config = budget_config
 
     async def execute(
         self,
@@ -132,7 +138,11 @@ class AgentRuntime:
         tool_executor = ToolExecutor(registry)
         # Estimate tool schema overhead: ~150 tokens per registered tool
         tool_schema_overhead = len(registry.get_all()) * 150
-        context_manager = ContextManager(tool_schema_overhead=tool_schema_overhead)
+        context_manager = ContextManager(
+            tool_schema_overhead=tool_schema_overhead,
+            soft_compaction_pct=self._budget_config.context_soft_compaction_pct if self._budget_config else 0.40,
+            hard_truncation_pct=self._budget_config.context_hard_truncation_pct if self._budget_config else 0.65,
+        )
 
         phase_runner = PhaseRunner(
             llm=self._llm,
@@ -143,6 +153,7 @@ class AgentRuntime:
             event_bus=self._event_bus,
             phase_limits=self._phase_limits,
             stream=self._stream,
+            stall_config=self._stall_config,
         )
 
         # Emit agent started

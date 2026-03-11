@@ -143,6 +143,25 @@ class AgentWorkingMemory:
                 return f"Marked item {item_index} as complete."
         return f"Error: No todo item with index {item_index}."
 
+    def batch_mark_todo_complete(self, items: List[Dict[str, Any]]) -> str:
+        """Mark multiple todo items as completed in one call."""
+        results = []
+        for entry in items:
+            idx = entry.get("item_index")
+            summary = entry.get("summary", "")
+            found = False
+            for item in self.todo_list:
+                if item.index == idx:
+                    item.completed = True
+                    item.completion_summary = summary
+                    found = True
+                    break
+            if found:
+                results.append(f"Item {idx}: marked complete")
+            else:
+                results.append(f"Item {idx}: not found")
+        return f"Batch complete: {len(results)} items processed.\n" + "\n".join(results)
+
     # -- Findings operations --
 
     def log_finding(
@@ -154,6 +173,17 @@ class AgentWorkingMemory:
             source=source, confidence=confidence,
         ))
         return f"Logged finding in category '{category}'. Total findings: {len(self.findings)}."
+
+    def batch_log_findings(self, findings: List[Dict[str, Any]]) -> str:
+        """Record multiple findings in one call."""
+        for f in findings:
+            self.findings.append(Finding(
+                category=f.get("category", "general"),
+                content=f.get("content", ""),
+                source=f.get("source", ""),
+                confidence=f.get("confidence", "medium"),
+            ))
+        return f"Logged {len(findings)} findings. Total findings: {len(self.findings)}."
 
     def get_findings(self, category: Optional[str] = None) -> str:
         """Retrieve findings, optionally filtered by category."""
@@ -313,6 +343,35 @@ def build_act_tools(memory: AgentWorkingMemory) -> List[ToolDef]:
             is_framework_tool=True,
         ),
         ToolDef(
+            name="batch_mark_todo_complete",
+            description=(
+                "Mark multiple todo items as completed in a single call. "
+                "Use this when you have finished several items and want to "
+                "update them all at once to save iterations."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "item_index": {"type": "integer", "description": "Index of the todo item."},
+                                "summary": {"type": "string", "description": "Brief summary of completion."},
+                            },
+                            "required": ["item_index", "summary"],
+                        },
+                        "description": "List of items to mark complete.",
+                    },
+                },
+                "required": ["items"],
+            },
+            handler=lambda items: memory.batch_mark_todo_complete(items),
+            phase_availability=[Phase.ACT],
+            is_framework_tool=True,
+        ),
+        ToolDef(
             name="log_finding",
             description=(
                 "Record a finding from your analysis. Findings are preserved "
@@ -335,6 +394,40 @@ def build_act_tools(memory: AgentWorkingMemory) -> List[ToolDef]:
             handler=lambda category, content, source, confidence="medium": (
                 memory.log_finding(category, content, source, confidence)
             ),
+            phase_availability=[Phase.ACT, Phase.REPORT],
+            is_framework_tool=True,
+        ),
+        ToolDef(
+            name="batch_log_findings",
+            description=(
+                "Record multiple findings in a single call. Use this when you "
+                "have several findings to log at once to save iterations. "
+                "Each finding needs category, content, source, and optional confidence."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "findings": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "category": {"type": "string", "description": "Finding category."},
+                                "content": {"type": "string", "description": "The finding content."},
+                                "source": {"type": "string", "description": "Where this finding came from."},
+                                "confidence": {
+                                    "type": "string", "enum": ["high", "medium", "low"],
+                                    "description": "Confidence level.",
+                                },
+                            },
+                            "required": ["category", "content", "source"],
+                        },
+                        "description": "List of findings to log.",
+                    },
+                },
+                "required": ["findings"],
+            },
+            handler=lambda findings: memory.batch_log_findings(findings),
             phase_availability=[Phase.ACT, Phase.REPORT],
             is_framework_tool=True,
         ),

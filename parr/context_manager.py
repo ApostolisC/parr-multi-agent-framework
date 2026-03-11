@@ -51,6 +51,17 @@ Your current task is to create a work plan. Follow these guidelines:
 5. Create a concrete, ordered todo list using the create_todo_list tool.
    Each todo item should be a specific, actionable step.
 
+Workload planning:
+- If the task has many independent parts (e.g. 10+ items to research, multiple
+  documents to analyze), plan to delegate groups of work to sub-agents using
+  spawn_agent in the execution phase. Each sub-agent handles a chunk.
+- Group related items together — it is more efficient to give a sub-agent
+  5 related items than to spawn 5 separate agents.
+- Reserve yourself for coordination: gather sub-agent results, synthesize
+  findings, fill gaps, and produce the final report.
+- For smaller tasks (under ~5 items), do the work directly — sub-agent
+  overhead is not worthwhile.
+
 Guidelines:
 - Call create_todo_list once with all your planned steps, then respond with
   your plan summary without calling additional tools.
@@ -71,9 +82,27 @@ For each todo item:
    of what you accomplished.
 4. Move to the next item.
 
+Efficiency tips:
+- When you have multiple findings ready, use batch_log_findings to log
+  them all in one call instead of calling log_finding repeatedly.
+- When you have completed several items, use batch_mark_todo_complete to
+  mark them all done at once.
+- You can call multiple tools in a single response (e.g. a domain tool +
+  log_finding + mark_todo_complete). This saves iterations.
+
+Delegation:
+- If a sub-task is complex enough to warrant a separate agent, use spawn_agent.
+  Give the sub-agent a clear task description and all the context it needs.
+- For large workloads with many independent items, spawn sub-agents to handle
+  chunks in parallel. For example, if you need to analyze 20 documents, spawn
+  sub-agents for groups of 5.
+- Sub-agent results are returned as structured data — use them directly in
+  your findings and report.
+- When you need a sub-agent's result before continuing, calling spawn_agent
+  blocks until the child completes. Plan your work order accordingly.
+
 Guidelines:
 - Focus on doing the work rather than managing the todo list.
-- If a sub-task is complex enough to warrant a separate agent, use spawn_agent.
 - If a tool has failed, note the error and consider alternative approaches
   rather than retrying the same call.
 - Keep the plan stable. If you discover gaps, note them as findings — the
@@ -139,11 +168,15 @@ class ContextManager:
         self,
         max_context_tokens: int = 128000,
         tool_schema_overhead: int = 0,
+        soft_compaction_pct: float = 0.40,
+        hard_truncation_pct: float = 0.65,
     ) -> None:
         self._max_context_tokens = max_context_tokens
         # Overhead tokens for tool schemas sent with each LLM call.
         # A reasonable estimate: num_tools * 150 tokens per tool schema.
         self._tool_schema_overhead = tool_schema_overhead
+        self._soft_compaction_pct = soft_compaction_pct
+        self._hard_truncation_pct = hard_truncation_pct
         # Accumulated context summaries from completed phases
         self._phase_summaries: Dict[Phase, str] = {}
         # Working memory state summaries (todo list, findings, etc.)
@@ -210,10 +243,10 @@ class ContextManager:
     def compact_if_needed(
         self,
         messages: List[Message],
-        soft_fraction: float = 0.40,
+        soft_fraction: Optional[float] = None,
     ) -> List[Message]:
         """
-        Soft compaction at 40% context usage.
+        Soft compaction at configurable context usage threshold.
 
         Smarter than hard truncation: summarizes completed todo/tool results
         but preserves important content like findings and raw data.
@@ -236,10 +269,13 @@ class ContextManager:
         Args:
             messages: Current message history.
             soft_fraction: Fraction of max_context_tokens as soft threshold.
+                Defaults to the instance-level soft_compaction_pct.
 
         Returns:
             Possibly compacted message list.
         """
+        if soft_fraction is None:
+            soft_fraction = self._soft_compaction_pct
         token_limit = int(self._max_context_tokens * soft_fraction)
         current_tokens = self.estimate_tokens(messages)
 
@@ -297,12 +333,12 @@ class ContextManager:
     def truncate_if_needed(
         self,
         messages: List[Message],
-        max_fraction: float = 0.65,
+        max_fraction: Optional[float] = None,
     ) -> List[Message]:
         """
-        Hard truncation at 65% context usage.
+        Hard truncation at configurable context usage threshold.
 
-        First attempts soft compaction at 40%. If still over the hard limit,
+        First attempts soft compaction. If still over the hard limit,
         aggressively truncates to system + user + last 3 message groups.
 
         Operates on *message groups* to avoid breaking the assistant→tool-result
@@ -316,6 +352,7 @@ class ContextManager:
         Args:
             messages: Current message history.
             max_fraction: Fraction of max_context_tokens as hard threshold.
+                Defaults to the instance-level hard_truncation_pct.
 
         Returns:
             Possibly truncated message list.
@@ -323,6 +360,8 @@ class ContextManager:
         # First try soft compaction
         messages = self.compact_if_needed(messages)
 
+        if max_fraction is None:
+            max_fraction = self._hard_truncation_pct
         token_limit = int(self._max_context_tokens * max_fraction)
         current_tokens = self.estimate_tokens(messages)
 

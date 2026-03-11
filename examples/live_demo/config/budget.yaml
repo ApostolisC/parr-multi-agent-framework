@@ -1,0 +1,19 @@
+# Budget for the live demo — generous enough for a real run, bounded for safety.
+
+budget_defaults:
+  max_tokens: 80000
+  max_cost: 2.0
+  max_duration_ms: 180000      # 3 minutes
+  max_agent_depth: 1
+  max_parallel_agents: 1
+  max_sub_agents_total: 0
+  inherit_remaining: true
+  child_budget_fraction: 0.5
+  context_soft_compaction_pct: 0.40
+  context_hard_truncation_pct: 0.65
+
+phase_limits:
+  plan: 5
+  act: 12
+  review: 4
+  report: 5

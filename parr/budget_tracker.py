@@ -183,12 +183,12 @@ class BudgetTracker:
         remaining_tokens = None
         if parent_node.budget.max_tokens:
             remaining = parent_node.budget.max_tokens - parent_node.budget_consumed.tokens
-            remaining_tokens = max(0, int(remaining * 0.5))
+            remaining_tokens = max(0, int(remaining * parent_node.budget.child_budget_fraction))
 
         remaining_cost = None
         if parent_node.budget.max_cost:
             remaining = parent_node.budget.max_cost - parent_node.budget_consumed.cost
-            remaining_cost = max(0.0, remaining * 0.5)
+            remaining_cost = max(0.0, remaining * parent_node.budget.child_budget_fraction)
 
         return BudgetConfig(
             max_tokens=remaining_tokens,

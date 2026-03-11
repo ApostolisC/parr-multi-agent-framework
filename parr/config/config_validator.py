@@ -398,6 +398,80 @@ def validate_tools_config(
 
 
 # ---------------------------------------------------------------------------
+# Providers config validation
+# ---------------------------------------------------------------------------
+
+_SUPPORTED_PROVIDERS = {"openai", "azure_openai", "anthropic"}
+
+_REQUIRED_PROVIDER_FIELDS: Dict[str, List[str]] = {
+    "openai": ["api_key"],
+    "azure_openai": ["api_key", "endpoint"],
+    "anthropic": ["api_key"],
+}
+
+
+def validate_providers_config(
+    providers: Dict[str, Dict[str, Any]],
+    default_provider: Optional[str],
+) -> List[str]:
+    """
+    Validate providers.yaml content.
+
+    Args:
+        providers: Parsed providers dict (provider_type -> settings).
+        default_provider: The default_provider value from the YAML root.
+
+    Returns:
+        List of error strings. Empty list means valid.
+    """
+    errors: List[str] = []
+
+    if not providers:
+        errors.append("providers.yaml must define at least one provider under 'providers'")
+        return errors
+
+    for provider_type, settings in providers.items():
+        ctx = f"Provider '{provider_type}'"
+
+        if provider_type not in _SUPPORTED_PROVIDERS:
+            errors.append(
+                f"{ctx} is not a supported provider type. "
+                f"Supported: {', '.join(sorted(_SUPPORTED_PROVIDERS))}"
+            )
+            continue
+
+        if not isinstance(settings, dict):
+            errors.append(f"{ctx} must be a mapping of settings")
+            continue
+
+        # Check required fields
+        required = _REQUIRED_PROVIDER_FIELDS.get(provider_type, [])
+        for field in required:
+            val = settings.get(field)
+            if not val or not isinstance(val, str) or not val.strip():
+                errors.append(f"{ctx} is missing required field '{field}'")
+
+        # Validate timeout if present
+        timeout = settings.get("timeout")
+        if timeout is not None:
+            if not isinstance(timeout, (int, float)) or timeout <= 0:
+                errors.append(
+                    f"{ctx} 'timeout' must be a positive number, got {timeout!r}"
+                )
+
+    # Validate default_provider
+    if default_provider is not None:
+        if default_provider not in providers:
+            available = ", ".join(sorted(providers.keys())) or "(none)"
+            errors.append(
+                f"default_provider '{default_provider}' is not defined under "
+                f"'providers'. Available: {available}"
+            )
+
+    return errors
+
+
+# ---------------------------------------------------------------------------
 # Templates config validation
 # ---------------------------------------------------------------------------
 

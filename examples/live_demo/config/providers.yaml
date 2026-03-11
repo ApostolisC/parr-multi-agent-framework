@@ -1,0 +1,20 @@
+# =============================================================================
+# LLM Provider Configuration — Live Demo
+# =============================================================================
+# Uses the same providers.yaml format as the research_assistant example.
+# Set environment variables before running.
+# =============================================================================
+
+default_provider: azure_openai
+
+providers:
+  azure_openai:
+    api_key: ${AZURE_OPENAI_API_KEY}
+    endpoint: ${AZURE_OPENAI_ENDPOINT}
+    api_version: ${AZURE_OPENAI_API_VERSION}
+
+  # openai:
+  #   api_key: ${OPENAI_API_KEY}
+
+  # anthropic:
+  #   api_key: ${ANTHROPIC_API_KEY}

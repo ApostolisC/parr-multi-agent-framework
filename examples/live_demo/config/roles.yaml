@@ -1,0 +1,14 @@
+# Roles for the live demo — single analyst role.
+
+roles:
+  analyst:
+    model: gpt-4o
+    description: "Analyzes a topic using provided reference documents."
+    system_prompt: system_prompts/analyst.md
+    output_schema: output_schemas/analyst.json
+    tools:
+      - search_knowledge_base
+      - get_document
+    model_config:
+      temperature: 0.3
+      max_tokens: 4096

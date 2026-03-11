@@ -26,12 +26,22 @@ Run the included example (no API key needed — uses a mock LLM):
 python -m examples.research_assistant.run
 ```
 
-Or with a real LLM:
+Or with a real LLM — set environment variables and use `providers.yaml`:
 
 ```bash
-export OPENAI_API_KEY=sk-...
+# Copy and fill in your credentials
+cp .env.example .env
+
+# Azure OpenAI (default in the example)
+export AZURE_OPENAI_API_KEY=your-key
+export AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
 python -m examples.research_assistant.run --live
+
+# Or use a different provider/model
+python -m examples.research_assistant.run --live --provider openai --model gpt-4o
 ```
+
+See [BUILDING_AGENTS.md](BUILDING_AGENTS.md) for the full `providers.yaml` reference.
 
 ## Architecture
 

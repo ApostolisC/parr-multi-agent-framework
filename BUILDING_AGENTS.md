@@ -344,7 +344,67 @@ The parent sees available roles via the `spawn_agent` tool description, which li
 
 ## 10. LLM adapters
 
-### OpenAI / Azure OpenAI
+### Option A: Declarative via providers.yaml (recommended)
+
+Add a `providers.yaml` to your config directory. API keys use `${ENV_VAR}` references resolved from environment variables at load time — never put actual secrets in the YAML file.
+
+```yaml
+# config/providers.yaml
+default_provider: azure_openai
+
+providers:
+  azure_openai:
+    api_key: ${AZURE_OPENAI_API_KEY}
+    endpoint: ${AZURE_OPENAI_ENDPOINT}
+    api_version: "2024-12-01-preview"
+
+  openai:
+    api_key: ${OPENAI_API_KEY}
+
+  anthropic:
+    api_key: ${ANTHROPIC_API_KEY}
+```
+
+Set environment variables and run — the config loader creates the LLM adapter automatically:
+
+```bash
+export AZURE_OPENAI_API_KEY="your-key"
+export AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com"
+```
+
+```python
+# No llm= needed — built from providers.yaml
+orchestrator = create_orchestrator_from_config(
+    config_dir="my_project/config",
+    tool_registry={"my_tool": my_tool_def},
+    event_sink=LoggingEventSink(),
+)
+```
+
+Override provider or model at runtime:
+
+```python
+orchestrator = create_orchestrator_from_config(
+    config_dir="my_project/config",
+    tool_registry={"my_tool": my_tool_def},
+    provider_override="openai",     # use OpenAI instead of default
+    model_override="gpt-4o",        # override model from roles.yaml
+)
+```
+
+**providers.yaml is optional.** If the file does not exist, pass `llm=` explicitly (see Option B).
+
+Provider-specific fields:
+
+| Provider | Required fields | Optional fields |
+|---|---|---|
+| `openai` | `api_key` | `timeout` |
+| `azure_openai` | `api_key`, `endpoint` | `api_version`, `timeout` |
+| `anthropic` | `api_key` | `timeout` |
+
+### Option B: Programmatic
+
+Create the LLM adapter directly in Python:
 
 ```python
 from parr.adapters import create_tool_calling_llm
@@ -360,11 +420,8 @@ llm = create_tool_calling_llm(
     api_key="...",
     api_version="2024-02-15-preview",
 )
-```
 
-### Anthropic
-
-```python
+# Anthropic
 llm = create_tool_calling_llm("anthropic", model="claude-3-5-sonnet-20241022", api_key="...")
 ```
 

@@ -42,7 +42,9 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+import os
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -56,9 +58,15 @@ from ..core_types import (
     ModelConfig,
     ModelPricing,
     Phase,
+    StallDetectionConfig,
     ToolDef,
 )
-from .config_validator import ConfigError, validate_config, validate_tools_config
+from .config_validator import (
+    ConfigError,
+    validate_config,
+    validate_providers_config,
+    validate_tools_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,12 +76,21 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 @dataclass
+class ProviderConfig:
+    """Resolved LLM provider settings from providers.yaml."""
+    provider_type: str
+    kwargs: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class ConfigBundle:
     """Everything produced by loading the config folder."""
     domain_adapter: ReferenceDomainAdapter
     cost_config: CostConfig
     default_budget: BudgetConfig
     phase_limits: Dict[Phase, int]
+    provider_config: Optional[ProviderConfig] = None
+    stall_config: Optional[StallDetectionConfig] = None
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +119,191 @@ def _read_json_file(config_dir: Path, rel_path: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Environment variable resolution
+# ---------------------------------------------------------------------------
+
+_ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _resolve_env_vars(
+    data: Any,
+    context: str = "providers.yaml",
+) -> Any:
+    """
+    Walk a parsed YAML structure and replace ``${VAR_NAME}`` references in
+    string values with the corresponding environment variable.
+
+    Raises ConfigError if a referenced variable is not set.
+    """
+    if isinstance(data, str):
+        missing: List[str] = []
+
+        def _replacer(match: re.Match) -> str:
+            var_name = match.group(1)
+            value = os.environ.get(var_name)
+            if value is None:
+                missing.append(var_name)
+                return match.group(0)  # keep original for error reporting
+            return value
+
+        result = _ENV_VAR_PATTERN.sub(_replacer, data)
+        if missing:
+            raise ConfigError([
+                f"{context}: environment variable '{v}' is not set"
+                for v in missing
+            ])
+        return result
+
+    if isinstance(data, dict):
+        return {
+            k: _resolve_env_vars(v, context=f"{context}.{k}")
+            for k, v in data.items()
+        }
+
+    if isinstance(data, list):
+        return [
+            _resolve_env_vars(item, context=f"{context}[{i}]")
+            for i, item in enumerate(data)
+        ]
+
+    # Numbers, booleans, None — pass through untouched
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Provider config loading
+# ---------------------------------------------------------------------------
+
+def _try_load_dotenv(config_dir: Path) -> None:
+    """
+    Attempt to load a ``.env`` file so that ``${VAR}`` references in
+    ``providers.yaml`` can be resolved.  Searches from *config_dir* upward
+    to the repository root (the first directory containing ``.git``,
+    ``pyproject.toml``, or ``setup.py``).
+
+    Requires the optional ``python-dotenv`` package.  If it is not installed
+    the function is a silent no-op — users must then export env vars
+    themselves.
+    """
+    try:
+        from dotenv import load_dotenv  # type: ignore[import-untyped]
+    except ImportError:
+        logger.debug(
+            "python-dotenv not installed — skipping .env auto-load. "
+            "Install it with: pip install python-dotenv"
+        )
+        return
+
+    # Walk upward from config_dir looking for .env
+    search = config_dir.resolve()
+    for parent in [search, *search.parents]:
+        env_path = parent / ".env"
+        if env_path.is_file():
+            load_dotenv(env_path, override=False)
+            logger.info(f".env loaded from {env_path}")
+            return
+        # Stop at repo root indicators
+        if any((parent / m).exists() for m in (".git", "pyproject.toml", "setup.py")):
+            # Check this directory but don't go higher
+            break
+
+    logger.debug("No .env file found in parent directories.")
+
+
+def _load_providers(
+    config_dir: Path,
+    provider_override: Optional[str] = None,
+) -> Optional[ProviderConfig]:
+    """
+    Load ``providers.yaml`` if it exists and return a resolved ProviderConfig.
+
+    Returns None if the file does not exist (backward-compatible).
+    """
+    providers_path = config_dir / "providers.yaml"
+    if not providers_path.is_file():
+        return None
+
+    # Auto-load .env before resolving ${VAR} references
+    _try_load_dotenv(config_dir)
+
+    raw = _load_yaml(providers_path)
+    raw_providers = raw.get("providers", {})
+    default_provider = raw.get("default_provider")
+
+    # Validate structure before env-var resolution
+    errors = validate_providers_config(raw_providers, default_provider)
+    if errors:
+        raise ConfigError(errors)
+
+    # Resolve environment variable references
+    resolved_providers = _resolve_env_vars(raw_providers, context="providers")
+
+    # Determine which provider to use
+    provider_type = provider_override or default_provider
+    if provider_type is None:
+        # Use the first (only) provider if there's exactly one
+        if len(resolved_providers) == 1:
+            provider_type = next(iter(resolved_providers))
+        else:
+            raise ConfigError([
+                "providers.yaml defines multiple providers but no "
+                "'default_provider' is set. Set 'default_provider' or "
+                "pass provider_override to select one."
+            ])
+
+    if provider_type not in resolved_providers:
+        available = ", ".join(sorted(resolved_providers.keys()))
+        raise ConfigError([
+            f"Provider '{provider_type}' is not defined in providers.yaml. "
+            f"Available: {available}"
+        ])
+
+    settings = resolved_providers[provider_type]
+
+    # Build kwargs for create_tool_calling_llm
+    kwargs: Dict[str, Any] = {}
+    if provider_type == "azure_openai":
+        kwargs["endpoint"] = settings["endpoint"]
+        kwargs["api_key"] = settings["api_key"]
+        kwargs["api_version"] = settings.get("api_version", "2024-12-01-preview")
+    elif provider_type == "openai":
+        kwargs["api_key"] = settings["api_key"]
+    elif provider_type == "anthropic":
+        kwargs["api_key"] = settings["api_key"]
+
+    if "timeout" in settings:
+        kwargs["timeout"] = float(settings["timeout"])
+
+    return ProviderConfig(provider_type=provider_type, kwargs=kwargs)
+
+
+def build_llm_from_provider_config(
+    provider_config: ProviderConfig,
+    model: str,
+    cost_config: Optional[CostConfig] = None,
+) -> Any:
+    """
+    Create a ToolCallingLLM instance from a resolved ProviderConfig.
+
+    Args:
+        provider_config: Resolved provider settings.
+        model: Model name or deployment name.
+        cost_config: Optional pricing config for cost tracking.
+
+    Returns:
+        A ToolCallingLLM-compatible adapter instance.
+    """
+    from ..adapters.llm_adapter import create_tool_calling_llm
+
+    return create_tool_calling_llm(
+        provider_type=provider_config.provider_type,
+        model=model,
+        cost_config=cost_config,
+        **provider_config.kwargs,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Core loader
 # ---------------------------------------------------------------------------
 
@@ -109,6 +311,7 @@ def load_config(
     config_dir: Union[str, Path],
     tool_registry: Optional[Dict[str, ToolDef]] = None,
     tool_handlers: Optional[Dict[str, Callable]] = None,
+    provider_override: Optional[str] = None,
 ) -> ConfigBundle:
     """
     Load all declarative config files and build framework objects.
@@ -118,6 +321,8 @@ def load_config(
             models.yaml, budget.yaml, and content folders.
         tool_registry: *Legacy* — mapping of tool name -> ToolDef (with
             handlers).  Used when tools.yaml does NOT exist.
+        provider_override: If set, override the ``default_provider``
+            in providers.yaml with this value.
         tool_handlers: *Declarative* — mapping of tool name -> Python
             callable.  Used together with tools.yaml, which provides the
             metadata (description, parameters, constraints).
@@ -158,6 +363,7 @@ def load_config(
     raw_models = models_data.get("models", {})
     raw_budget = budget_data.get("budget_defaults", {})
     raw_phase_limits = budget_data.get("phase_limits", {})
+    raw_stall = budget_data.get("stall_detection", {})
     raw_roles = roles_data.get("roles", {})
 
     # -- Resolve tools (declarative vs legacy) -------------------------------
@@ -206,6 +412,9 @@ def load_config(
     # -- Build phase limits --------------------------------------------------
     phase_limits = _build_phase_limits(raw_phase_limits)
 
+    # -- Build stall detection config ----------------------------------------
+    stall_config = _build_stall_config(raw_stall) if raw_stall else None
+
     # -- Build DomainAdapter -------------------------------------------------
     domain_adapter = _build_domain_adapter(
         config_dir=config_dir,
@@ -213,11 +422,21 @@ def load_config(
         tool_registry=built_tools,
     )
 
+    # -- Load providers (optional) -------------------------------------------
+    # Provider loading is deferred — only attempted when the caller needs
+    # an auto-created LLM (i.e., no explicit llm= passed).  This avoids
+    # failing on missing env vars when running in mock / offline mode.
+    provider_config = None
+    if provider_override is not None:
+        # Explicit request → resolve now
+        provider_config = _load_providers(config_dir, provider_override)
+
     logger.info(
         f"Config loaded: {len(raw_roles)} role(s), "
         f"{len(raw_models)} model(s), "
         f"{len(built_tools)} tool(s), "
         f"budget max_tokens={default_budget.max_tokens}"
+        + (f", provider={provider_config.provider_type}" if provider_config else "")
     )
 
     return ConfigBundle(
@@ -225,6 +444,8 @@ def load_config(
         cost_config=cost_config,
         default_budget=default_budget,
         phase_limits=phase_limits,
+        provider_config=provider_config,
+        stall_config=stall_config,
     )
 
 
@@ -254,6 +475,21 @@ def _build_budget_config(raw_budget: Dict[str, Any]) -> BudgetConfig:
         max_parallel_agents=raw_budget.get("max_parallel_agents", 3),
         max_sub_agents_total=raw_budget.get("max_sub_agents_total", 3),
         inherit_remaining=raw_budget.get("inherit_remaining", True),
+        child_budget_fraction=raw_budget.get("child_budget_fraction", 0.5),
+        max_child_review_cycles=raw_budget.get("max_child_review_cycles"),
+        context_soft_compaction_pct=raw_budget.get("context_soft_compaction_pct", 0.40),
+        context_hard_truncation_pct=raw_budget.get("context_hard_truncation_pct", 0.65),
+    )
+
+
+def _build_stall_config(raw_stall: Dict[str, Any]) -> StallDetectionConfig:
+    """Build StallDetectionConfig from parsed budget.yaml stall_detection section."""
+    return StallDetectionConfig(
+        max_consecutive_tool_failures=raw_stall.get("max_consecutive_tool_failures", 3),
+        max_framework_stall_iterations=raw_stall.get("max_framework_stall_iterations", 5),
+        max_fw_only_consecutive_iterations=raw_stall.get("max_fw_only_consecutive_iterations", 10),
+        max_duplicate_call_iterations=raw_stall.get("max_duplicate_call_iterations", 4),
+        duplicate_call_window=raw_stall.get("duplicate_call_window", 8),
     )
 
 
@@ -493,19 +729,28 @@ def create_orchestrator_from_config(
     event_sink: Any = None,
     max_review_cycles: int = 2,
     stream: bool = False,
+    provider_override: Optional[str] = None,
+    model_override: Optional[str] = None,
 ) -> Any:
     """
     Load config and create a fully-wired Orchestrator in one step.
+
+    If ``llm`` is not provided but ``providers.yaml`` exists in the config
+    directory, the LLM adapter is created automatically from environment
+    variables referenced in that file.
 
     Args:
         config_dir: Path to the config directory.
         tool_registry: *Legacy* — Tool name -> ToolDef mapping.
         tool_handlers: *Declarative* — Tool name -> Python callable mapping
             (used with tools.yaml).
-        llm: ToolCallingLLM instance.
+        llm: ToolCallingLLM instance.  If None, built from providers.yaml.
         event_sink: Optional EventSink instance.
         max_review_cycles: Max review retry attempts (default 2).
         stream: Whether to stream LLM tokens.
+        provider_override: Override ``default_provider`` from providers.yaml.
+        model_override: Model name to use when building LLM from providers.yaml.
+            If not set, falls back to the first model in models.yaml.
 
     Returns:
         A configured Orchestrator instance.
@@ -517,7 +762,34 @@ def create_orchestrator_from_config(
         config_dir,
         tool_registry=tool_registry,
         tool_handlers=tool_handlers,
+        provider_override=provider_override,
     )
+
+    # Auto-build LLM from providers.yaml if no explicit llm provided
+    provider_config = bundle.provider_config
+    if llm is None:
+        # Try to load providers.yaml if not already loaded
+        if provider_config is None:
+            provider_config = _load_providers(
+                Path(config_dir).resolve(), provider_override,
+            )
+        if provider_config is not None:
+            # Determine model: explicit override > first model in cost_config
+            model = model_override
+            if model is None and bundle.cost_config.models:
+                model = next(iter(bundle.cost_config.models))
+            if model is None:
+                raise ConfigError([
+                    "Cannot auto-create LLM: no model specified. "
+                    "Pass model_override or define models in models.yaml."
+                ])
+            llm = build_llm_from_provider_config(
+                provider_config, model, bundle.cost_config,
+            )
+            logger.info(
+                f"LLM auto-created: provider={provider_config.provider_type}, "
+                f"model={model}"
+            )
 
     return Orchestrator(
         llm=llm,
@@ -528,4 +800,5 @@ def create_orchestrator_from_config(
         default_budget=bundle.default_budget,
         max_review_cycles=max_review_cycles,
         stream=stream,
+        stall_config=bundle.stall_config,
     )

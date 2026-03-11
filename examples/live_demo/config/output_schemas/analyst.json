@@ -1,0 +1,28 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "A 2-3 sentence executive summary of the analysis."
+    },
+    "themes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "supporting_evidence": { "type": "string" }
+        },
+        "required": ["name", "description"]
+      },
+      "description": "Key themes identified in the research."
+    },
+    "gaps": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Topics or questions not covered by the available documents."
+    }
+  },
+  "required": ["summary", "themes"]
+}

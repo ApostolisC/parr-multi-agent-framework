@@ -46,6 +46,7 @@ from .core_types import (
     ErrorSource,
     ExecutionMetadata,
     Phase,
+    StallDetectionConfig,
     ToolCall,
     ToolDef,
     ToolResult,
@@ -85,6 +86,7 @@ class Orchestrator:
         phase_limits: Optional[Dict[Phase, int]] = None,
         default_budget: Optional[BudgetConfig] = None,
         stream: bool = False,
+        stall_config: Optional[StallDetectionConfig] = None,
     ) -> None:
         self._llm = llm
         self._domain_adapter = domain_adapter
@@ -93,6 +95,7 @@ class Orchestrator:
         self._phase_limits = phase_limits
         self._default_budget = default_budget or BudgetConfig()
         self._stream = stream
+        self._stall_config = stall_config
 
         # Internal event bus
         self._event_bus = EventBus()
@@ -226,6 +229,8 @@ class Orchestrator:
                 available_roles_description=roles_desc,
                 report_template_handler=report_template_handler,
                 stream=self._stream,
+                stall_config=self._stall_config,
+                budget_config=workflow_budget,
             )
 
             # Execute with orchestrator tool handling
@@ -475,10 +480,12 @@ class Orchestrator:
         )
 
         # Create child runtime and execute synchronously.
-        # Sub-agents get at most 1 review cycle to avoid costly retry loops
-        # that rarely converge (sub-agents typically lack the data sources
-        # to satisfy a reviewer's demands for more detail).
-        child_review_cycles = min(self._max_review_cycles, 1)
+        # Sub-agents get limited review cycles to avoid costly retry loops.
+        # Configurable via budget.max_child_review_cycles; defaults to 1.
+        max_child_reviews = parent_node.budget.max_child_review_cycles
+        if max_child_reviews is None:
+            max_child_reviews = 1
+        child_review_cycles = min(self._max_review_cycles, max_child_reviews)
         child_runtime = AgentRuntime(
             llm=self._llm,
             budget_tracker=self._budget_tracker,
@@ -488,6 +495,8 @@ class Orchestrator:
             available_roles_description=roles_description,
             report_template_handler=self._build_report_template_handler(),
             stream=self._stream,
+            stall_config=self._stall_config,
+            budget_config=child_budget,
         )
 
         child_output = await child_runtime.execute(

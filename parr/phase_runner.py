@@ -89,7 +89,9 @@ _READ_ONLY_FRAMEWORK_TOOLS = frozenset({
 # data sources) aren't force-stopped while making genuine progress.
 _PROGRESS_FRAMEWORK_TOOLS = frozenset({
     "log_finding",
+    "batch_log_findings",
     "mark_todo_complete",
+    "batch_mark_todo_complete",
     "review_checklist",
     "submit_report",
 })
@@ -226,10 +228,15 @@ class PhaseRunner:
         _recent_iteration_signatures: List[Set[str]] = []
         _consecutive_duplicate_iterations = 0
         _budget_warning_injected = False
+        _iteration_advisory_injected = False
         _iteration_warning_injected = False
         _progress_injected = False
         _mandatory_nudge_given = False
-        _warn_threshold = max(1, max_iterations - 2)
+        _circuit_breaker_warnings: Set[str] = set()
+        _duplicate_warning_injected = False
+        _stall_warning_injected = False
+        _advisory_threshold = max(1, max_iterations - 3)
+        _warn_threshold = max(1, max_iterations - 1)
         _mid_threshold = max(2, max_iterations // 2)
         _domain_tool_calls = 0
         _framework_tool_calls = 0
@@ -242,23 +249,44 @@ class PhaseRunner:
             if node.status == AgentStatus.CANCELLED:
                 raise CancelledException(f"Agent {node.agent_id} was cancelled")
 
-            # Iteration limit warning: nudge the LLM to produce text output
-            # when approaching the iteration cap.  Same pattern as the budget
-            # warning (see below).
+            # Two-stage iteration limit awareness:
+            # 1. Advisory at max-3: let the LLM know it's running low
+            # 2. Firmer guidance at max-1: strongly recommend wrapping up
+            # The LLM retains the choice to continue if it judges the
+            # remaining work is critical.
+            if not _iteration_advisory_injected and iteration >= _advisory_threshold:
+                _iteration_advisory_injected = True
+                remaining = max_iterations - iteration
+                messages.append(Message(
+                    role=MessageRole.USER,
+                    content=(
+                        f"[ITERATION ADVISORY] You have used {iteration} of "
+                        f"{max_iterations} iterations for this phase ({remaining} "
+                        f"remaining). Consider wrapping up: prioritize the most "
+                        f"important remaining work, and prepare to produce your "
+                        f"final text response soon."
+                    ),
+                ))
+                logger.info(
+                    f"Iteration advisory injected at iteration "
+                    f"{iteration}/{max_iterations} in {phase.value} "
+                    f"for agent {node.agent_id}"
+                )
             if not _iteration_warning_injected and iteration >= _warn_threshold:
                 _iteration_warning_injected = True
                 messages.append(Message(
                     role=MessageRole.USER,
                     content=(
-                        "[ITERATION LIMIT] You have used most of your allowed "
-                        "iterations for this phase. You MUST now stop calling "
-                        "tools and produce your final text response to complete "
-                        "this phase. Summarize your work so far and respond "
-                        "with text only — do NOT call any more tools."
+                        f"[ITERATION WARNING] This is your last iteration "
+                        f"({iteration}/{max_iterations}). You should produce "
+                        f"your final text response now to complete this phase. "
+                        f"If you have critical unfinished work, you may make "
+                        f"one more tool call, but be aware the phase will end "
+                        f"after this iteration."
                     ),
                 ))
                 logger.info(
-                    f"Iteration limit warning injected at iteration "
+                    f"Iteration warning injected at iteration "
                     f"{iteration}/{max_iterations} in {phase.value} "
                     f"for agent {node.agent_id}"
                 )
@@ -385,18 +413,42 @@ class PhaseRunner:
                     })
 
                     # Circuit breaker: track consecutive failures per tool.
-                    # Reset on success; suppress after self._stall.max_consecutive_tool_failures.
+                    # Reset on success; warn then suppress after threshold.
                     if tool_result.success:
                         tool_consecutive_failures.pop(tool_call.name, None)
+                        _circuit_breaker_warnings.discard(tool_call.name)
                     else:
                         count = tool_consecutive_failures.get(tool_call.name, 0) + 1
                         tool_consecutive_failures[tool_call.name] = count
+                        # At threshold-1: warn the LLM (advisory, not removal)
+                        if (count == self._stall.max_consecutive_tool_failures - 1
+                                and tool_call.name not in _circuit_breaker_warnings):
+                            _circuit_breaker_warnings.add(tool_call.name)
+                            messages.append(Message(
+                                role=MessageRole.USER,
+                                content=(
+                                    f"[TOOL WARNING] Tool '{tool_call.name}' has "
+                                    f"failed {count} consecutive times. It will "
+                                    f"be temporarily disabled if it fails once "
+                                    f"more. Consider an alternative approach or "
+                                    f"different parameters."
+                                ),
+                            ))
                         if count == self._stall.max_consecutive_tool_failures:
                             logger.warning(
                                 f"Circuit breaker: suppressing '{tool_call.name}' "
                                 f"after {count} consecutive failures in "
                                 f"{phase.value} for agent {node.agent_id}"
                             )
+                            messages.append(Message(
+                                role=MessageRole.USER,
+                                content=(
+                                    f"[TOOL DISABLED] Tool '{tool_call.name}' has "
+                                    f"been temporarily disabled after "
+                                    f"{count} consecutive failures. Use alternative "
+                                    f"tools or approaches to continue your work."
+                                ),
+                            ))
 
                     # Check if this is a non-framework tool call
                     tool_def = self._tool_registry.get(tool_call.name)
@@ -455,6 +507,23 @@ class PhaseRunner:
                     _consecutive_duplicate_iterations += 1
                 else:
                     _consecutive_duplicate_iterations = 0
+
+                # Advisory at 2 consecutive duplicate iterations
+                if (_consecutive_duplicate_iterations == 2
+                        and not _duplicate_warning_injected):
+                    _duplicate_warning_injected = True
+                    messages.append(Message(
+                        role=MessageRole.USER,
+                        content=(
+                            "[DUPLICATE CALL WARNING] You have been making the "
+                            "same tool calls repeatedly for 2 iterations. This "
+                            "pattern suggests a loop. Consider: (1) using "
+                            "different parameters, (2) trying a different tool, "
+                            "or (3) producing your final response if you have "
+                            "enough data. The phase will be force-completed if "
+                            "this pattern continues."
+                        ),
+                    ))
 
                 if _consecutive_duplicate_iterations >= self._stall.max_duplicate_call_iterations:
                     logger.warning(
@@ -516,6 +585,29 @@ class PhaseRunner:
                     #    that evade the read-only detector.  Progress-producing
                     #    tools reset this counter, so only pure bookkeeping
                     #    loops are caught.
+
+                    # Advisory warning before force-completion
+                    _approaching_stall = (
+                        _consecutive_stall_iterations == self._stall.max_framework_stall_iterations - 2
+                        or _consecutive_fw_only_iterations == self._stall.max_fw_only_consecutive_iterations - 2
+                    )
+                    if _approaching_stall and not _stall_warning_injected:
+                        _stall_warning_injected = True
+                        messages.append(Message(
+                            role=MessageRole.USER,
+                            content=(
+                                "[STALL WARNING] You have been calling only "
+                                "framework tools (get_todo_list, get_findings, "
+                                "etc.) without making progress with domain tools. "
+                                "This pattern suggests you may be stuck. Consider: "
+                                "(1) calling domain tools to fetch or process data, "
+                                "(2) using log_finding or mark_todo_complete to "
+                                "record progress, or (3) producing your final "
+                                "response. The phase will be force-completed if "
+                                "no domain tool progress is detected soon."
+                            ),
+                        ))
+
                     _hit_stall = (
                         _consecutive_stall_iterations >= self._stall.max_framework_stall_iterations
                         or _consecutive_fw_only_iterations >= self._stall.max_fw_only_consecutive_iterations

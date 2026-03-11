@@ -31,12 +31,20 @@ Usage:
     )
 """
 
-from .config_loader import ConfigBundle, load_config, create_orchestrator_from_config
+from .config_loader import (
+    ConfigBundle,
+    ProviderConfig,
+    build_llm_from_provider_config,
+    load_config,
+    create_orchestrator_from_config,
+)
 from .config_validator import ConfigError
 
 __all__ = [
     "ConfigBundle",
     "ConfigError",
+    "ProviderConfig",
+    "build_llm_from_provider_config",
     "load_config",
     "create_orchestrator_from_config",
 ]

@@ -13,6 +13,10 @@ budget_defaults:
   max_parallel_agents: 3    # Max concurrent child agents
   max_sub_agents_total: 10  # Max total children a single agent can spawn
   inherit_remaining: true   # Children inherit parent's remaining budget
+  child_budget_fraction: 0.5          # Fraction of remaining budget given to each child agent
+  max_child_review_cycles: ~          # Max review cycles for child agents (null = use parent's)
+  context_soft_compaction_pct: 0.40   # Trigger soft compaction at this % of context window
+  context_hard_truncation_pct: 0.65   # Trigger hard truncation at this % of context window
 
 # Iteration limits per phase. Each iteration = one LLM call (any tool call).
 # Both domain and framework tool calls count toward these limits.
@@ -21,3 +25,13 @@ phase_limits:
   act: 15
   review: 5
   report: 5
+
+# Stall detection thresholds. These control when the framework intervenes
+# to prevent the agent from looping. Advisory warnings are issued before
+# force-completion to give the LLM a chance to self-correct.
+# stall_detection:
+#   max_consecutive_tool_failures: 3   # Disable tool after N consecutive failures
+#   max_framework_stall_iterations: 5  # Force-complete after N read-only stall iterations
+#   max_fw_only_consecutive_iterations: 10  # Force-complete after N framework-only iterations
+#   max_duplicate_call_iterations: 4   # Force-complete after N duplicate-call iterations
+#   duplicate_call_window: 8           # Window of recent iterations to check for duplicates

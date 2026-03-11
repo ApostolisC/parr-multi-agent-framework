@@ -1,0 +1,24 @@
+# =============================================================================
+# LLM Provider Configuration
+# =============================================================================
+# Defines available LLM providers and their connection settings.
+# API keys and endpoints use ${ENV_VAR} references resolved from environment
+# variables at load time. Never put actual secrets in this file.
+#
+# Supported providers: openai, azure_openai, anthropic
+# =============================================================================
+
+default_provider: azure_openai
+
+providers:
+  azure_openai:
+    api_key: ${AZURE_OPENAI_API_KEY}
+    endpoint: ${AZURE_OPENAI_ENDPOINT}
+    api_version: ${AZURE_OPENAI_API_VERSION}
+    # timeout: 120.0  # optional, seconds
+
+  # openai:
+  #   api_key: ${OPENAI_API_KEY}
+
+  # anthropic:
+  #   api_key: ${ANTHROPIC_API_KEY}
