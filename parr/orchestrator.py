@@ -87,6 +87,7 @@ class Orchestrator:
         default_budget: Optional[BudgetConfig] = None,
         stream: bool = False,
         stall_config: Optional[StallDetectionConfig] = None,
+        wait_for_agents_timeout: Optional[float] = None,
     ) -> None:
         self._llm = llm
         self._domain_adapter = domain_adapter
@@ -96,6 +97,7 @@ class Orchestrator:
         self._default_budget = default_budget or BudgetConfig()
         self._stream = stream
         self._stall_config = stall_config
+        self._wait_for_agents_timeout = wait_for_agents_timeout
 
         # Internal event bus
         self._event_bus = EventBus()
@@ -154,7 +156,15 @@ class Orchestrator:
 
         Returns:
             AgentOutput from the root agent.
+
+        Raises:
+            ValueError: If required parameters are missing or invalid.
         """
+        if not task or not task.strip():
+            raise ValueError("'task' must be a non-empty string.")
+        if not role or not role.strip():
+            raise ValueError("'role' must be a non-empty string.")
+
         workflow_budget = budget or self._default_budget
 
         # Resolve config from adapter if available
@@ -398,6 +408,22 @@ class Orchestrator:
         sub_role = args.get("sub_role")
         task_description = args.get("task_description", "")
 
+        # Validate required fields
+        if not role or not role.strip():
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                success=False,
+                content="",
+                error="spawn_agent requires a non-empty 'role'.",
+            )
+        if not task_description or not task_description.strip():
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                success=False,
+                content="",
+                error="spawn_agent requires a non-empty 'task_description'.",
+            )
+
         # Validate depth limit
         if parent_node.depth + 1 >= parent_node.budget.max_agent_depth:
             return ToolResult(
@@ -578,8 +604,17 @@ class Orchestrator:
 
         Awaits all requested child tasks concurrently via ``asyncio.gather``.
         Tasks that have already finished are collected immediately.
+        A configurable timeout prevents indefinite blocking.
         """
         task_ids = tool_call.arguments.get("task_ids", [])
+
+        if not task_ids:
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                success=False,
+                content="",
+                error="wait_for_agents requires a non-empty 'task_ids' list.",
+            )
 
         # Validate all task IDs are children
         for tid in task_ids:
@@ -591,20 +626,44 @@ class Orchestrator:
                     error=f"Task {tid} is not a child of this agent.",
                 )
 
-        # Await any tasks that are still pending
+        # Await any tasks that are still pending, with optional timeout
         still_running = [
             self._pending_tasks[tid]
             for tid in task_ids
             if tid in self._pending_tasks and not self._pending_tasks[tid].done()
         ]
+        timed_out = False
         if still_running:
-            await asyncio.gather(*still_running, return_exceptions=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*still_running, return_exceptions=True),
+                    timeout=self._wait_for_agents_timeout,
+                )
+            except asyncio.TimeoutError:
+                timed_out = True
+                logger.warning(
+                    f"wait_for_agents timed out after "
+                    f"{self._wait_for_agents_timeout}s for tasks {task_ids}"
+                )
 
         # Collect results for all requested children
         results = {
             tid: self._collect_child_result(tid, workflow)
             for tid in task_ids
         }
+
+        if timed_out:
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                success=False,
+                content=json.dumps(results, indent=2, default=str),
+                error=(
+                    f"wait_for_agents timed out after "
+                    f"{self._wait_for_agents_timeout}s. "
+                    f"Some agents may still be running. "
+                    f"Partial results are included in the content."
+                ),
+            )
 
         return ToolResult(
             tool_call_id=tool_call.id,
@@ -618,6 +677,12 @@ class Orchestrator:
         """Collect the result for a single child task after awaiting."""
         pending = self._pending_tasks.pop(task_id, None)
         if pending is not None and pending.done():
+            if pending.cancelled():
+                return {
+                    "task_id": task_id,
+                    "status": "cancelled",
+                    "error": "Agent task was cancelled.",
+                }
             exc = pending.exception()
             if exc is not None:
                 return {

@@ -127,15 +127,19 @@ class BudgetTracker:
         # Update both levels atomically — if either fails, roll back.
         prev_agent_tokens = node.budget_consumed.tokens
         prev_agent_cost = node.budget_consumed.cost
+        prev_workflow_tokens = workflow.budget_consumed.tokens
+        prev_workflow_cost = workflow.budget_consumed.cost
         try:
             node.budget_consumed.tokens += usage.total_tokens
             node.budget_consumed.cost += cost
             workflow.budget_consumed.tokens += usage.total_tokens
             workflow.budget_consumed.cost += cost
         except Exception:
-            # Roll back agent-level to keep both in sync
+            # Roll back both levels to keep them in sync
             node.budget_consumed.tokens = prev_agent_tokens
             node.budget_consumed.cost = prev_agent_cost
+            workflow.budget_consumed.tokens = prev_workflow_tokens
+            workflow.budget_consumed.cost = prev_workflow_cost
             raise
 
         logger.debug(
