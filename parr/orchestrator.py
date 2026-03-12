@@ -110,6 +110,8 @@ class Orchestrator:
         # Active workflows
         self._workflows: Dict[str, WorkflowExecution] = {}
         self._trace_stores: Dict[str, TraceStore] = {}
+        # Background child agent tasks: {task_id: asyncio.Task}
+        self._pending_tasks: Dict[str, asyncio.Task] = {}
 
     # -----------------------------------------------------------------------
     # Public API
@@ -275,6 +277,8 @@ class Orchestrator:
             raise
 
         finally:
+            # Cancel and clean up any still-running child tasks
+            await self._cancel_pending_tasks()
             self._event_bridge.disconnect_all()
 
     async def cancel_workflow(self, workflow_id: str) -> None:
@@ -290,6 +294,9 @@ class Orchestrator:
             return
 
         workflow.status = WorkflowStatus.CANCELLED
+
+        # Cancel pending background tasks first
+        await self._cancel_pending_tasks()
 
         for task_id, node in workflow.agent_tree.items():
             if node.status in (AgentStatus.RUNNING, AgentStatus.SUSPENDED):
@@ -379,7 +386,13 @@ class Orchestrator:
         trace_store: TraceStore,
         roles_description: str,
     ) -> ToolResult:
-        """Handle spawn_agent tool call."""
+        """Handle spawn_agent tool call.
+
+        Launches the child agent as a background ``asyncio.Task`` and returns
+        immediately with the child's ``task_id``.  The parent can continue
+        working (or spawn more children) and later call ``wait_for_agents``
+        to collect results.
+        """
         args = tool_call.arguments
         role = args.get("role", "")
         sub_role = args.get("sub_role")
@@ -479,7 +492,6 @@ class Orchestrator:
             trace_snapshot=trace_store.get_snapshot(child_node.task_id),
         )
 
-        # Create child runtime and execute synchronously.
         # Sub-agents get limited review cycles to avoid costly retry loops.
         # Configurable via budget.max_child_review_cycles; defaults to 1.
         max_child_reviews = parent_node.budget.max_child_review_cycles
@@ -499,31 +511,59 @@ class Orchestrator:
             budget_config=child_budget,
         )
 
-        child_output = await child_runtime.execute(
-            config=child_config,
-            input=child_input,
-            node=child_node,
-            workflow=workflow,
-            on_orchestrator_tool=lambda tc: self._handle_orchestrator_tool(
-                tc, child_node, workflow, trace_store, roles_description,
-            ),
-        )
+        # Launch child execution as a background task so the parent can
+        # continue working (or spawn more agents) concurrently.
+        async def _run_child() -> AgentOutput:
+            try:
+                output = await child_runtime.execute(
+                    config=child_config,
+                    input=child_input,
+                    node=child_node,
+                    workflow=workflow,
+                    on_orchestrator_tool=lambda tc: self._handle_orchestrator_tool(
+                        tc, child_node, workflow, trace_store, roles_description,
+                    ),
+                )
+                _child_success = output.status in ("completed", "degraded")
+                trace_store.update_status(
+                    child_node.task_id,
+                    AgentStatus.COMPLETED if _child_success else AgentStatus.FAILED,
+                    output_summary=output.summary[:200],
+                )
+                return output
+            except Exception as e:
+                logger.error(
+                    f"Child agent {child_node.agent_id} failed: {e}",
+                    exc_info=True,
+                )
+                trace_store.update_status(
+                    child_node.task_id,
+                    AgentStatus.FAILED,
+                    output_summary=str(e)[:200],
+                )
+                raise
 
-        # Update trace
-        _child_success = child_output.status in ("completed", "degraded")
-        trace_store.update_status(
-            child_node.task_id,
-            AgentStatus.COMPLETED if _child_success else AgentStatus.FAILED,
-            output_summary=child_output.summary[:200],
+        task = asyncio.create_task(
+            _run_child(),
+            name=f"agent-{child_node.task_id[:8]}",
         )
+        self._pending_tasks[child_node.task_id] = task
 
-        # Return child output as tool result
-        output_summary = json.dumps(child_output.to_dict(), indent=2, default=str)
         return ToolResult(
             tool_call_id=tool_call.id,
-            success=_child_success,
-            content=output_summary,
-            error=None if _child_success else child_output.summary,
+            success=True,
+            content=json.dumps({
+                "task_id": child_node.task_id,
+                "agent_id": child_config.agent_id,
+                "role": role,
+                "sub_role": sub_role,
+                "status": "spawned",
+                "message": (
+                    f"Agent spawned and running in the background. "
+                    f"Use wait_for_agents with task_id '{child_node.task_id}' "
+                    f"to collect results when ready."
+                ),
+            }),
         )
 
     async def _handle_wait_for_agents(
@@ -534,7 +574,11 @@ class Orchestrator:
         trace_store: TraceStore,
         roles_description: str,
     ) -> ToolResult:
-        """Handle wait_for_agents tool call."""
+        """Handle wait_for_agents tool call.
+
+        Awaits all requested child tasks concurrently via ``asyncio.gather``.
+        Tasks that have already finished are collected immediately.
+        """
         task_ids = tool_call.arguments.get("task_ids", [])
 
         # Validate all task IDs are children
@@ -547,27 +591,51 @@ class Orchestrator:
                     error=f"Task {tid} is not a child of this agent.",
                 )
 
-        # Since we execute children synchronously, they should already be complete
-        # This tool is mainly useful for future async execution support
-        results = {}
-        for tid in task_ids:
-            child = workflow.agent_tree.get(tid)
-            if child and child.result:
-                results[tid] = child.result.to_dict()
-            elif child:
-                results[tid] = {
-                    "task_id": tid,
-                    "status": child.status.value,
-                    "error": "No result available",
-                }
-            else:
-                results[tid] = {"task_id": tid, "error": "Agent not found"}
+        # Await any tasks that are still pending
+        still_running = [
+            self._pending_tasks[tid]
+            for tid in task_ids
+            if tid in self._pending_tasks and not self._pending_tasks[tid].done()
+        ]
+        if still_running:
+            await asyncio.gather(*still_running, return_exceptions=True)
+
+        # Collect results for all requested children
+        results = {
+            tid: self._collect_child_result(tid, workflow)
+            for tid in task_ids
+        }
 
         return ToolResult(
             tool_call_id=tool_call.id,
             success=True,
             content=json.dumps(results, indent=2, default=str),
         )
+
+    def _collect_child_result(
+        self, task_id: str, workflow: WorkflowExecution,
+    ) -> Dict[str, Any]:
+        """Collect the result for a single child task after awaiting."""
+        pending = self._pending_tasks.pop(task_id, None)
+        if pending is not None and pending.done():
+            exc = pending.exception()
+            if exc is not None:
+                return {
+                    "task_id": task_id,
+                    "status": "failed",
+                    "error": str(exc)[:500],
+                }
+
+        child = workflow.agent_tree.get(task_id)
+        if child and child.result:
+            return child.result.to_dict()
+        if child:
+            return {
+                "task_id": task_id,
+                "status": child.status.value,
+                "error": "No result available",
+            }
+        return {"task_id": task_id, "error": "Agent not found"}
 
     async def _handle_get_agent_result(
         self,
@@ -649,6 +717,22 @@ class Orchestrator:
             success=True,
             content=json.dumps(results, indent=2, default=str),
         )
+
+    # -----------------------------------------------------------------------
+    # Pending-task lifecycle helpers
+    # -----------------------------------------------------------------------
+
+    async def _cancel_pending_tasks(self) -> None:
+        """Cancel all pending background child tasks and await their completion."""
+        for tid, task in self._pending_tasks.items():
+            if not task.done():
+                task.cancel()
+        # Wait for cancellation to propagate
+        if self._pending_tasks:
+            await asyncio.gather(
+                *self._pending_tasks.values(), return_exceptions=True,
+            )
+            self._pending_tasks.clear()
 
     # -----------------------------------------------------------------------
     # Config resolution

@@ -121,7 +121,12 @@ class EventBridge:
 
     The orchestrator uses the EventBus internally. This bridge subscribes
     to the bus and forwards events to the adapter's EventSink.
+
+    An optional concurrency limit (``max_concurrent``) provides lightweight
+    backpressure so a slow sink doesn't allow unbounded concurrent emits.
     """
+
+    _MAX_CONCURRENT_EMITS = 32  # sensible default, no knob needed yet
 
     def __init__(self, bus: EventBus, sink: Any) -> None:
         """
@@ -132,6 +137,9 @@ class EventBridge:
         self._bus = bus
         self._sink = sink
         self._subscriptions: List[Subscription] = []
+        self._failure_count: int = 0
+        self._last_error: Optional[Exception] = None
+        self._semaphore = asyncio.Semaphore(self._MAX_CONCURRENT_EMITS)
 
     def connect(self, workflow_id: str) -> None:
         """Start forwarding events for a workflow to the sink."""
@@ -145,8 +153,24 @@ class EventBridge:
         self._subscriptions.clear()
 
     async def _forward(self, event: FrameworkEvent) -> None:
-        """Forward an event to the sink."""
-        try:
-            await self._sink.emit(event.to_dict())
-        except Exception as e:
-            logger.error(f"EventBridge forward error: {e}", exc_info=True)
+        """Forward an event to the sink with backpressure."""
+        async with self._semaphore:
+            try:
+                await self._sink.emit(event.to_dict())
+            except Exception as e:
+                self._failure_count += 1
+                self._last_error = e
+                logger.warning(
+                    f"EventBridge forward error (failure #{self._failure_count}): {e}",
+                    exc_info=True,
+                )
+
+    @property
+    def failure_count(self) -> int:
+        """Number of failed event forwards since creation."""
+        return self._failure_count
+
+    @property
+    def last_error(self) -> Optional[Exception]:
+        """The most recent forwarding error, if any."""
+        return self._last_error

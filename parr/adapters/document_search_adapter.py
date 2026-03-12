@@ -19,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import collections
 import concurrent.futures
 import logging
 from typing import Any, Dict, List, Optional
@@ -66,8 +67,9 @@ class RAGDocumentSearchAdapter:
         self._project_id = project_id
         self._retrieval_method = retrieval_method
         self._tenant_config = tenant_config or {"allow_external_llm": True}
-        # Simple cache: section_id → chunk data (from recent searches)
-        self._chunk_cache: Dict[str, Dict[str, Any]] = {}
+        # LRU cache: section_id → chunk data (from recent searches).
+        # Uses OrderedDict for O(1) move-to-end on access and eviction from front.
+        self._chunk_cache: collections.OrderedDict[str, Dict[str, Any]] = collections.OrderedDict()
 
     # -- DocumentSearchProvider protocol -------------------------------------
 
@@ -125,10 +127,8 @@ class RAGDocumentSearchAdapter:
             }
             results.append(entry)
 
-            # Cache full chunk data for get_section() (with eviction)
-            if len(self._chunk_cache) >= _CACHE_MAX_SIZE:
-                self._chunk_cache.clear()
-            self._chunk_cache[section_id] = {
+            # Cache full chunk data for get_section() (with LRU eviction)
+            self._cache_put(section_id, {
                 "section_id": section_id,
                 "source_file": chunk.filename,
                 "section_title": f"Chunk {chunk.chunk_index} from {chunk.filename}",
@@ -142,7 +142,7 @@ class RAGDocumentSearchAdapter:
                     "char_offset_end": chunk.char_offset_end,
                     "score": chunk.score,
                 },
-            }
+            })
 
         logger.debug(
             f"RAG search returned {len(results)} results for "
@@ -163,8 +163,9 @@ class RAGDocumentSearchAdapter:
         Returns:
             Dict with: section_id, source_file, section_title, full_text, metadata.
         """
-        # Check cache first
+        # Check cache first (and mark as recently used)
         if section_id in self._chunk_cache:
+            self._chunk_cache.move_to_end(section_id)
             return self._chunk_cache[section_id]
 
         # Parse section_id and attempt re-fetch
@@ -216,7 +217,7 @@ class RAGDocumentSearchAdapter:
                             "chunk_index": chunk.chunk_index,
                         },
                     }
-                    self._chunk_cache[section_id] = result
+                    self._cache_put(section_id, result)
                     return result
 
         except Exception as e:
@@ -234,6 +235,16 @@ class RAGDocumentSearchAdapter:
         }
 
     # -- cache management ----------------------------------------------------
+
+    def _cache_put(self, key: str, value: Dict[str, Any]) -> None:
+        """Insert or update a cache entry, evicting LRU items if at capacity."""
+        if key in self._chunk_cache:
+            self._chunk_cache.move_to_end(key)
+            self._chunk_cache[key] = value
+            return
+        while len(self._chunk_cache) >= _CACHE_MAX_SIZE:
+            self._chunk_cache.popitem(last=False)  # evict oldest
+        self._chunk_cache[key] = value
 
     def clear_cache(self) -> None:
         """Clear the section cache."""

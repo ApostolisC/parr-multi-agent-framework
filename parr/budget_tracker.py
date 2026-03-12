@@ -63,6 +63,9 @@ class BudgetTracker:
 
         Must be called BEFORE every LLM call.
 
+        For child agents, also verifies that the parent's budget hasn't
+        been exhausted since the child was spawned (dynamic check).
+
         Raises:
             BudgetExceededException: If any limit is exceeded.
         """
@@ -74,6 +77,18 @@ class BudgetTracker:
             agent_id=node.agent_id,
             workflow_id=workflow.workflow_id,
         )
+
+        # Check parent budget dynamically (guards against concurrent overrun)
+        if node.parent_task_id:
+            parent = workflow.agent_tree.get(node.parent_task_id)
+            if parent:
+                self._check_limits(
+                    parent.budget_consumed,
+                    parent.budget,
+                    scope=f"parent:{parent.agent_id}",
+                    agent_id=node.agent_id,
+                    workflow_id=workflow.workflow_id,
+                )
 
         # Check agent-level limits
         self._check_limits(
@@ -109,13 +124,19 @@ class BudgetTracker:
         )
         cost = self._cost_config.calculate_cost(model, usage, strict=has_cost_budget)
 
-        # Agent-level
-        node.budget_consumed.tokens += usage.total_tokens
-        node.budget_consumed.cost += cost
-
-        # Workflow-level
-        workflow.budget_consumed.tokens += usage.total_tokens
-        workflow.budget_consumed.cost += cost
+        # Update both levels atomically — if either fails, roll back.
+        prev_agent_tokens = node.budget_consumed.tokens
+        prev_agent_cost = node.budget_consumed.cost
+        try:
+            node.budget_consumed.tokens += usage.total_tokens
+            node.budget_consumed.cost += cost
+            workflow.budget_consumed.tokens += usage.total_tokens
+            workflow.budget_consumed.cost += cost
+        except Exception:
+            # Roll back agent-level to keep both in sync
+            node.budget_consumed.tokens = prev_agent_tokens
+            node.budget_consumed.cost = prev_agent_cost
+            raise
 
         logger.debug(
             f"Budget: agent={node.agent_id} "

@@ -116,9 +116,6 @@ class AgentWorkingMemory:
                     )
                 )
             changes.append(f"added {len(add)} items")
-        # Re-index
-        for i, item in enumerate(self.todo_list):
-            item.index = i
         return f"Updated todo list: {', '.join(changes)}. Total items: {len(self.todo_list)}."
 
     def get_todo_list(self) -> str:

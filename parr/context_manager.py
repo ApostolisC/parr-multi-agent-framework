@@ -26,8 +26,9 @@ from .core_types import (
 
 logger = logging.getLogger(__name__)
 
-# Approximate chars per token for estimation (conservative)
-CHARS_PER_TOKEN = 4
+# Default approximate chars per token for estimation (conservative).
+# Can be overridden per-instance via the ``chars_per_token`` constructor arg.
+DEFAULT_CHARS_PER_TOKEN = 4.0
 
 # Phase-specific system prompt additions
 #
@@ -170,6 +171,7 @@ class ContextManager:
         tool_schema_overhead: int = 0,
         soft_compaction_pct: float = 0.40,
         hard_truncation_pct: float = 0.65,
+        chars_per_token: float = DEFAULT_CHARS_PER_TOKEN,
     ) -> None:
         self._max_context_tokens = max_context_tokens
         # Overhead tokens for tool schemas sent with each LLM call.
@@ -177,6 +179,7 @@ class ContextManager:
         self._tool_schema_overhead = tool_schema_overhead
         self._soft_compaction_pct = soft_compaction_pct
         self._hard_truncation_pct = hard_truncation_pct
+        self._chars_per_token = chars_per_token
         # Accumulated context summaries from completed phases
         self._phase_summaries: Dict[Phase, str] = {}
         # Working memory state summaries (todo list, findings, etc.)
@@ -199,7 +202,7 @@ class ContextManager:
             if msg.tool_calls:
                 for tc in msg.tool_calls:
                     total_chars += len(str(tc.arguments))
-        return (total_chars // CHARS_PER_TOKEN) + self._tool_schema_overhead
+        return int(total_chars / self._chars_per_token) + self._tool_schema_overhead
 
     def build_phase_messages(
         self,
@@ -319,7 +322,13 @@ class ContextManager:
         if dropped_summary:
             result.append(Message(
                 role=MessageRole.USER,
-                content=f"[Summary of earlier work]\n{dropped_summary}",
+                content=(
+                    "[CONTEXT COMPACTED] Some earlier messages were summarised "
+                    "to free context space. Your findings and recent work are "
+                    "preserved. If you need details that appear missing, check "
+                    "your working memory (get_findings / get_todo_list).\n\n"
+                    f"{dropped_summary}"
+                ),
             ))
         for group in findings_groups:
             result.extend(group)
@@ -392,7 +401,13 @@ class ContextManager:
         if dropped_summary:
             result.append(Message(
                 role=MessageRole.USER,
-                content=f"[Context summary of earlier work]\n{dropped_summary}",
+                content=(
+                    "[CONTEXT TRUNCATED] Earlier messages were aggressively "
+                    "trimmed to stay within the context limit. Only your most "
+                    "recent work is visible. Rely on your working memory "
+                    "(get_findings / get_todo_list) for prior results.\n\n"
+                    f"{dropped_summary}"
+                ),
             ))
         for group in recent_groups:
             result.extend(group)

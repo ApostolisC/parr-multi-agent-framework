@@ -142,6 +142,7 @@ class AgentRuntime:
             tool_schema_overhead=tool_schema_overhead,
             soft_compaction_pct=self._budget_config.context_soft_compaction_pct if self._budget_config else 0.40,
             hard_truncation_pct=self._budget_config.context_hard_truncation_pct if self._budget_config else 0.65,
+            chars_per_token=self._budget_config.chars_per_token if self._budget_config else 4.0,
         )
 
         phase_runner = PhaseRunner(
@@ -232,6 +233,38 @@ class AgentRuntime:
             retry_count = 0
             prev_fail_count = self._count_review_failures(memory)
 
+            # If the LLM produced no checklist and no REVIEW_PASSED/FAILED
+            # marker, re-prompt once to get a clear signal before defaulting.
+            if review_pass is None:
+                logger.info(
+                    f"Review produced no structured signal for agent "
+                    f"{config.agent_id}. Re-prompting for explicit evaluation."
+                )
+                memory.review_checklist = None
+                review_result = await self._run_phase(
+                    phase_runner=phase_runner,
+                    phase=Phase.REVIEW,
+                    node=node,
+                    workflow=workflow,
+                    config=config,
+                    input=input,
+                    context_manager=context_manager,
+                    memory=memory,
+                    on_orchestrator_tool=on_orchestrator_tool,
+                    extra_context=(
+                        "Your previous review did not produce a clear verdict. "
+                        "You MUST use the review_checklist tool to evaluate each "
+                        "criterion, then state REVIEW_PASSED or REVIEW_FAILED."
+                    ),
+                )
+                self._accumulate_usage(total_usage, review_result)
+                self._accumulate_tool_calls(execution_metadata, review_result)
+                review_pass = self._evaluate_review(review_result, memory)
+                review_iterations += review_result.iterations
+                # If still ambiguous after re-prompt, assume pass
+                if review_pass is None:
+                    review_pass = True
+
             while not review_pass and retry_count < self._max_review_cycles:
                 retry_count += 1
                 logger.info(
@@ -278,6 +311,10 @@ class AgentRuntime:
 
                 review_pass = self._evaluate_review(review_result, memory)
                 review_iterations += review_result.iterations
+                # In retry loop, ambiguous means the LLM still isn't
+                # producing a signal — treat as pass to avoid looping.
+                if review_pass is None:
+                    review_pass = True
 
                 # Plateau detection: stop retrying if quality isn't improving
                 current_fail_count = self._count_review_failures(memory)
@@ -523,8 +560,15 @@ class AgentRuntime:
             for tool in build_agent_management_tools(self._available_roles_description):
                 registry.register(tool)
 
-        # Domain tools from input
+        # Domain tools from input — validate no shadowing of framework tools
+        framework_names = set(registry.tool_names)
         for tool in domain_tools:
+            if tool.name in framework_names:
+                logger.warning(
+                    f"Domain tool '{tool.name}' shadows a framework tool and "
+                    f"will be skipped. Rename it to avoid conflicts."
+                )
+                continue
             registry.register(tool)
 
         return registry
@@ -584,7 +628,7 @@ class AgentRuntime:
 
     def _evaluate_review(
         self, review_result: PhaseResult, memory: AgentWorkingMemory,
-    ) -> bool:
+    ) -> Optional[bool]:
         """Determine if the review passed.
 
         The structured checklist (from the review_checklist tool) is the
@@ -596,6 +640,10 @@ class AgentRuntime:
 
         Text markers (REVIEW_PASSED / REVIEW_FAILED) are used as a
         fallback when no checklist was recorded.
+
+        Returns:
+            True if review passed, False if it explicitly failed,
+            None if no structured signal was found (ambiguous).
         """
         # Prefer structured checklist when available
         if memory.review_checklist:
@@ -611,8 +659,8 @@ class AgentRuntime:
         if REVIEW_FAILED_MARKER in content:
             return False
 
-        # If no explicit signal, assume pass (conservative — don't infinite loop)
-        return True
+        # No structured signal — caller should re-prompt once
+        return None
 
     @staticmethod
     def _count_review_failures(memory: AgentWorkingMemory) -> int:

@@ -108,6 +108,7 @@ class CompositeEventSink:
             sinks: List of EventSink-compatible objects (each has async emit()).
         """
         self._sinks = list(sinks)
+        self._failure_counts: Dict[int, int] = {}  # sink id(obj) -> count
 
     async def emit(self, event: Dict[str, Any]) -> None:
         """Forward the event to all child sinks."""
@@ -115,8 +116,11 @@ class CompositeEventSink:
             try:
                 await sink.emit(event)
             except Exception as e:
-                logger.error(
-                    f"CompositeEventSink: child sink failed for "
+                key = id(sink)
+                self._failure_counts[key] = self._failure_counts.get(key, 0) + 1
+                logger.warning(
+                    f"CompositeEventSink: child sink {type(sink).__name__} failed "
+                    f"(failure #{self._failure_counts[key]}) for "
                     f"{event.get('event_type', '?')}: {e}"
                 )
 

@@ -69,14 +69,42 @@ class ContentFilterError(RuntimeError):
 
 
 def _is_content_filter_error(error: Exception) -> bool:
-    """Detect whether an error is a content filter / responsible AI block."""
+    """Detect whether an error is a content filter / responsible AI block.
+
+    Checks structured error attributes first (reliable), then falls back
+    to string matching for providers that don't expose structured codes.
+    """
+    # --- Structured attribute checks (most reliable) ---
+
+    # OpenAI / Azure SDK: error.code or error.error.code
+    error_code = getattr(error, "code", None) or ""
+    if isinstance(error_code, str) and error_code.lower() in (
+        "content_filter", "content_management_policy",
+        "responsibleaipolicyviolation",
+    ):
+        return True
+
+    # Some SDK errors nest details under an `error` dict/object
+    inner = getattr(error, "error", None)
+    if isinstance(inner, dict):
+        inner_code = str(inner.get("code", "")).lower()
+        inner_type = str(inner.get("type", "")).lower()
+        if inner_code in ("content_filter", "responsibleaipolicyviolation"):
+            return True
+        if "content_filter" in inner_type:
+            return True
+
+    # Anthropic: error.type
+    error_type = getattr(error, "type", None)
+    if isinstance(error_type, str) and "content" in error_type.lower():
+        return True
+
+    # --- String-based fallback (less reliable, but catches edge cases) ---
     error_str = str(error).lower()
-    # Azure OpenAI content filter patterns
     if "content_filter" in error_str or "content management policy" in error_str:
         return True
     if "responsibleaipolicyviolation" in error_str:
         return True
-    # Generic content filter patterns from other providers
     if "content policy" in error_str and "filtered" in error_str:
         return True
     return False
@@ -97,7 +125,12 @@ def _extract_filter_details(error: Exception) -> Dict:
 
 
 def _is_retryable_error(error: Exception) -> bool:
-    """Determine if an error is transient and worth retrying."""
+    """Determine if an error is transient and worth retrying.
+
+    Uses structured attributes first, falls back to string matching.
+    SDK type checks are wrapped defensively so missing/changed SDK
+    classes don't cause secondary failures.
+    """
     # Content filter errors are NOT retryable with the same prompt
     if _is_content_filter_error(error):
         return False
@@ -115,13 +148,25 @@ def _is_retryable_error(error: Exception) -> bool:
             return True
         if isinstance(error, httpx.HTTPStatusError):
             return error.response.status_code in _RETRYABLE_STATUS_CODES
-    except ImportError:
+    except (ImportError, AttributeError):
         pass
 
-    # OpenAI and Anthropic SDKs wrap HTTP errors in their own types.
-    # Check for status_code attribute on the exception.
+    # OpenAI SDK: APIStatusError.status_code
+    # Anthropic SDK: APIStatusError.status_code
+    # Check via getattr so we don't depend on SDK class hierarchy.
     status_code = getattr(error, "status_code", None)
-    if status_code is not None and status_code in _RETRYABLE_STATUS_CODES:
+    if status_code is not None:
+        try:
+            if int(status_code) in _RETRYABLE_STATUS_CODES:
+                return True
+        except (ValueError, TypeError):
+            pass
+
+    # OpenAI SDK v1+: error.code may be a string like "server_error"
+    error_code = getattr(error, "code", None)
+    if isinstance(error_code, str) and error_code.lower() in (
+        "server_error", "rate_limit_exceeded", "service_unavailable",
+    ):
         return True
 
     # Fallback: match common transient error string patterns

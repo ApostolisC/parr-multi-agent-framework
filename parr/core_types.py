@@ -207,7 +207,7 @@ class ToolDef:
 # Budget
 # ---------------------------------------------------------------------------
 
-@dataclass
+@dataclass(frozen=True)
 class BudgetConfig:
     """Budget limits for an agent or workflow."""
     max_tokens: Optional[int] = None
@@ -221,6 +221,7 @@ class BudgetConfig:
     max_child_review_cycles: Optional[int] = None  # None = use parent's max_review_cycles
     context_soft_compaction_pct: float = 0.40  # Fraction of context for soft compaction
     context_hard_truncation_pct: float = 0.65  # Fraction of context for hard truncation
+    chars_per_token: float = 4.0  # Tuneable token estimation ratio (chars / token)
 
 
 @dataclass
@@ -279,7 +280,7 @@ class PlanContext:
 # Stall detection
 # ---------------------------------------------------------------------------
 
-@dataclass
+@dataclass(frozen=True)
 class StallDetectionConfig:
     """Tuneable thresholds for PhaseRunner stall detection."""
     max_consecutive_tool_failures: int = 3
@@ -293,7 +294,7 @@ class StallDetectionConfig:
 # Agent configuration (what defines an agent)
 # ---------------------------------------------------------------------------
 
-@dataclass
+@dataclass(frozen=True)
 class ModelConfig:
     """LLM model parameters."""
     temperature: float = 0.7
@@ -301,7 +302,7 @@ class ModelConfig:
     max_tokens: int = 4096
 
 
-@dataclass
+@dataclass(frozen=True)
 class AgentConfig:
     """
     What defines an agent instance.
@@ -476,7 +477,7 @@ class WorkflowExecution:
 # Cost configuration
 # ---------------------------------------------------------------------------
 
-@dataclass
+@dataclass(frozen=True)
 class ModelPricing:
     """Pricing for a single model."""
     input_price_per_1k: float = 0.0
