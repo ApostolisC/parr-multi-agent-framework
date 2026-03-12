@@ -235,6 +235,12 @@ class PhaseRunner:
         _circuit_breaker_warnings: Set[str] = set()
         _duplicate_warning_injected = False
         _stall_warning_injected = False
+        # Iteration limit awareness thresholds.
+        # Advisory fires first (a few iterations before the end),
+        # warning fires on the penultimate iteration.
+        # For very small limits (≤3), thresholds are clamped so that
+        # advisory fires at iteration 1 and warning fires at most at
+        # max_iterations-1, ensuring they never overlap.
         _advisory_threshold = max(1, max_iterations - 3)
         _warn_threshold = max(_advisory_threshold + 1, max_iterations - 1)
         _mid_threshold = max(2, max_iterations // 2)
