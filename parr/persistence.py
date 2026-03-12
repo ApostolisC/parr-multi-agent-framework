@@ -302,7 +302,10 @@ class AgentFileStore:
         The child's folder is placed under ``sub_agents/<role>_<short_id>/``
         inside this agent's directory.
         """
-        safe_role = role.replace("/", "_").replace("\\", "_")[:30]
+        import re
+        # Remove any character that is unsafe for file-system paths across
+        # platforms (Windows: :*?"<>|, all: / \, control chars).
+        safe_role = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", role)[:30]
         short_id = task_id[:8]
         child_dir = self._dir / "sub_agents" / f"{safe_role}_{short_id}"
         return AgentFileStore(child_dir)

@@ -217,6 +217,8 @@ class AgentRuntime:
             if act_result.hit_iteration_limit:
                 phases_hitting_limit.append("act")
             self._persist_phase(act_result, memory)
+
+            # ── Phase 3: Review (with retry loop) ──
             review_result = await self._run_phase(
                 phase_runner=phase_runner,
                 phase=Phase.REVIEW,
