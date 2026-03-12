@@ -724,15 +724,15 @@ class Orchestrator:
 
     async def _cancel_pending_tasks(self) -> None:
         """Cancel all pending background child tasks and await their completion."""
-        for tid, task in self._pending_tasks.items():
+        # Snapshot to avoid RuntimeError from dict mutation during iteration
+        tasks_snapshot = list(self._pending_tasks.values())
+        for task in tasks_snapshot:
             if not task.done():
                 task.cancel()
         # Wait for cancellation to propagate
-        if self._pending_tasks:
-            await asyncio.gather(
-                *self._pending_tasks.values(), return_exceptions=True,
-            )
-            self._pending_tasks.clear()
+        if tasks_snapshot:
+            await asyncio.gather(*tasks_snapshot, return_exceptions=True)
+        self._pending_tasks.clear()
 
     # -----------------------------------------------------------------------
     # Config resolution

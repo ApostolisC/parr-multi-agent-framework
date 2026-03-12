@@ -285,8 +285,13 @@ class ContextManager:
         if current_tokens <= token_limit:
             return messages
 
-        # Not enough messages to compact meaningfully
+        # Not enough messages to compact meaningfully — but still over limit.
         if len(messages) <= 6:
+            logger.warning(
+                f"Context ({current_tokens} tokens) exceeds soft limit "
+                f"({token_limit}) but has too few messages ({len(messages)}) "
+                f"to compact. Consider reducing system prompt or input size."
+            )
             return messages
 
         logger.info(
@@ -386,6 +391,11 @@ class ContextManager:
         groups = self._pair_messages(messages[2:])
 
         if len(groups) <= 3:
+            logger.warning(
+                f"Context ({current_tokens} tokens) exceeds hard limit "
+                f"({token_limit}) but has too few message groups "
+                f"({len(groups)}) to truncate further."
+            )
             return messages  # Not enough to truncate
 
         preserved_start = messages[:2]  # system + user

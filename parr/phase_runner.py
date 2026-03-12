@@ -236,7 +236,7 @@ class PhaseRunner:
         _duplicate_warning_injected = False
         _stall_warning_injected = False
         _advisory_threshold = max(1, max_iterations - 3)
-        _warn_threshold = max(1, max_iterations - 1)
+        _warn_threshold = max(_advisory_threshold + 1, max_iterations - 1)
         _mid_threshold = max(2, max_iterations // 2)
         _domain_tool_calls = 0
         _framework_tool_calls = 0
