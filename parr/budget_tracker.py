@@ -205,11 +205,23 @@ class BudgetTracker:
         if parent_node.budget.max_tokens:
             remaining = parent_node.budget.max_tokens - parent_node.budget_consumed.tokens
             remaining_tokens = max(0, int(remaining * parent_node.budget.child_budget_fraction))
+            if remaining_tokens == 0:
+                logger.warning(
+                    f"Child budget for agent {parent_node.agent_id} has 0 "
+                    f"remaining tokens (parent remaining: {remaining}). "
+                    f"Child will immediately exceed budget."
+                )
 
         remaining_cost = None
         if parent_node.budget.max_cost:
             remaining = parent_node.budget.max_cost - parent_node.budget_consumed.cost
             remaining_cost = max(0.0, remaining * parent_node.budget.child_budget_fraction)
+            if remaining_cost == 0.0:
+                logger.warning(
+                    f"Child budget for agent {parent_node.agent_id} has $0 "
+                    f"remaining cost (parent remaining: ${remaining:.4f}). "
+                    f"Child will immediately exceed budget."
+                )
 
         return BudgetConfig(
             max_tokens=remaining_tokens,

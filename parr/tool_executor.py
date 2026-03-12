@@ -91,7 +91,8 @@ class ToolExecutor:
                        f"Available phases: {[p.value for p in tool_def.phase_availability]}",
             )
 
-        # Rate limit check
+        # Rate limit check — count is incremented before execution so that
+        # failed attempts are also counted, preventing infinite retry loops.
         if tool_def.max_calls_per_phase is not None:
             count = self._call_counts.get(tool_call.name, 0)
             if count >= tool_def.max_calls_per_phase:
@@ -103,6 +104,7 @@ class ToolExecutor:
                            f"{tool_def.max_calls_per_phase} calls in the "
                            f"'{self._current_phase.value}' phase.",
                 )
+            self._call_counts[tool_call.name] = count + 1
 
         # Orchestrator tools should not be executed here
         if tool_def.is_orchestrator_tool:
@@ -157,11 +159,6 @@ class ToolExecutor:
                         content="",
                         error=output_error,
                     )
-
-                # Track call count
-                self._call_counts[tool_call.name] = (
-                    self._call_counts.get(tool_call.name, 0) + 1
-                )
 
                 # Serialize output
                 serialized = self._serialize_output(tool_def, result_content)
