@@ -40,6 +40,7 @@ from .framework_tools import (
     build_report_tools,
     build_review_tools,
 )
+from .persistence import AgentFileStore
 from .phase_runner import CancelledException, PhaseResult, PhaseRunner
 from .tool_executor import ToolExecutor
 from .tool_registry import ToolRegistry
@@ -92,6 +93,7 @@ class AgentRuntime:
         stream: bool = False,
         stall_config: Optional[StallDetectionConfig] = None,
         budget_config: Optional[BudgetConfig] = None,
+        agent_file_store: Optional[AgentFileStore] = None,
     ) -> None:
         self._llm = llm
         self._budget_tracker = budget_tracker
@@ -103,6 +105,7 @@ class AgentRuntime:
         self._stream = stream
         self._stall_config = stall_config
         self._budget_config = budget_config
+        self._file_store = agent_file_store
 
     async def execute(
         self,
@@ -192,6 +195,7 @@ class AgentRuntime:
             execution_metadata.phase_outputs["plan"] = plan_result.content or ""
             if plan_result.hit_iteration_limit:
                 phases_hitting_limit.append("plan")
+            self._persist_phase(plan_result, memory)
 
             # ── Phase 2: Act ──
             act_result = await self._run_phase(
@@ -212,8 +216,7 @@ class AgentRuntime:
             execution_metadata.phase_outputs["act"] = act_result.content or ""
             if act_result.hit_iteration_limit:
                 phases_hitting_limit.append("act")
-
-            # ── Phase 3: Review (with retry loop) ──
+            self._persist_phase(act_result, memory)
             review_result = await self._run_phase(
                 phase_runner=phase_runner,
                 phase=Phase.REVIEW,
@@ -338,6 +341,7 @@ class AgentRuntime:
             execution_metadata.phase_outputs["review"] = review_result.content or ""
             if review_result.hit_iteration_limit:
                 phases_hitting_limit.append("review")
+            self._persist_phase(review_result, memory)
 
             # ── Phase 4: Report ──
             report_result = await self._run_phase(
@@ -358,6 +362,7 @@ class AgentRuntime:
             execution_metadata.phase_outputs["report"] = report_result.content or ""
             if report_result.hit_iteration_limit:
                 phases_hitting_limit.append("report")
+            self._persist_phase(report_result, memory)
 
             # Validate submitted report against output schema (graceful)
             if memory.submitted_report and input.output_schema:
@@ -398,6 +403,9 @@ class AgentRuntime:
 
             node.status = AgentStatus.COMPLETED
             node.result = output
+
+            # Persist final output and status
+            self._persist_output(output)
 
             await self._event_bus.publish(agent_completed(
                 workflow_id=workflow.workflow_id,
@@ -526,6 +534,36 @@ class AgentRuntime:
     # -----------------------------------------------------------------------
     # Internal
     # -----------------------------------------------------------------------
+
+    def _persist_phase(
+        self, phase_result: PhaseResult, memory: AgentWorkingMemory,
+    ) -> None:
+        """Persist phase conversation, tool calls, and working memory."""
+        if not self._file_store:
+            return
+        try:
+            self._file_store.save_phase_conversation(
+                phase_result.phase.value,
+                content=phase_result.content,
+                iterations=phase_result.iterations,
+                hit_iteration_limit=phase_result.hit_iteration_limit,
+                tool_calls_made=phase_result.tool_calls_made,
+            )
+            if phase_result.tool_calls_made:
+                self._file_store.append_tool_calls(phase_result.tool_calls_made)
+            self._file_store.save_memory(memory)
+        except Exception as e:
+            logger.error(f"Failed to persist phase data: {e}", exc_info=True)
+
+    def _persist_output(self, output: AgentOutput) -> None:
+        """Persist the agent's final output and update agent status."""
+        if not self._file_store:
+            return
+        try:
+            self._file_store.save_output(output)
+            self._file_store.update_agent_status(output.status)
+        except Exception as e:
+            logger.error(f"Failed to persist agent output: {e}", exc_info=True)
 
     def _build_tool_registry(
         self,

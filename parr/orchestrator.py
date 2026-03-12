@@ -32,6 +32,7 @@ from .event_types import (
     # when async agent execution with real suspension/resumption is added.
     # Currently unused — v1 runs all agents synchronously.
 )
+from .persistence import AgentFileStore, WorkflowFileStore
 from .trace_store import TraceStore
 from .core_types import (
     AgentConfig,
@@ -88,6 +89,7 @@ class Orchestrator:
         stream: bool = False,
         stall_config: Optional[StallDetectionConfig] = None,
         wait_for_agents_timeout: Optional[float] = None,
+        persist_dir: Optional[str] = None,
     ) -> None:
         self._llm = llm
         self._domain_adapter = domain_adapter
@@ -98,6 +100,7 @@ class Orchestrator:
         self._stream = stream
         self._stall_config = stall_config
         self._wait_for_agents_timeout = wait_for_agents_timeout
+        self._persist_dir = persist_dir
 
         # Internal event bus
         self._event_bus = EventBus()
@@ -195,6 +198,26 @@ class Orchestrator:
         # Build available roles description for spawn_agent tool
         roles_desc = self._build_roles_description()
 
+        # Set up optional file-system persistence
+        wf_store: Optional[WorkflowFileStore] = None
+        root_store: Optional[AgentFileStore] = None
+        if self._persist_dir:
+            try:
+                wf_store = WorkflowFileStore(self._persist_dir, workflow.workflow_id)
+                wf_store.save_workflow_info(
+                    workflow_id=workflow.workflow_id,
+                    status="running",
+                    budget={
+                        "max_tokens": workflow_budget.max_tokens,
+                        "max_cost": workflow_budget.max_cost,
+                        "max_duration_ms": workflow_budget.max_duration_ms,
+                    },
+                    created_at=workflow.created_at.isoformat(),
+                )
+            except Exception as e:
+                logger.error(f"Failed to initialise persistence: {e}", exc_info=True)
+                wf_store = None
+
         try:
             # Create root agent node
             root_node = AgentNode(
@@ -206,6 +229,34 @@ class Orchestrator:
             )
             workflow.root_task_id = root_node.task_id
             workflow.agent_tree[root_node.task_id] = root_node
+
+            # Set up root persistence store
+            if wf_store:
+                try:
+                    root_store = wf_store.create_root_store(root_node.task_id)
+                    root_store.save_agent_info(
+                        task_id=root_node.task_id,
+                        agent_id=config.agent_id,
+                        role=config.role,
+                        sub_role=config.sub_role,
+                        task=task[:500],
+                        status="running",
+                        depth=0,
+                        model=config.model,
+                    )
+                    wf_store.save_workflow_info(
+                        workflow_id=workflow.workflow_id,
+                        status="running",
+                        root_task_id=root_node.task_id,
+                        budget={
+                            "max_tokens": workflow_budget.max_tokens,
+                            "max_cost": workflow_budget.max_cost,
+                            "max_duration_ms": workflow_budget.max_duration_ms,
+                        },
+                        created_at=workflow.created_at.isoformat(),
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to persist root agent info: {e}", exc_info=True)
 
             # Add to trace
             trace_store.add_entry(TraceEntry(
@@ -243,6 +294,7 @@ class Orchestrator:
                 stream=self._stream,
                 stall_config=self._stall_config,
                 budget_config=workflow_budget,
+                agent_file_store=root_store,
             )
 
             # Execute with orchestrator tool handling
@@ -253,6 +305,7 @@ class Orchestrator:
                 workflow=workflow,
                 on_orchestrator_tool=lambda tc: self._handle_orchestrator_tool(
                     tc, root_node, workflow, trace_store, roles_desc,
+                    wf_store,
                 ),
             )
 
@@ -272,6 +325,13 @@ class Orchestrator:
                 else WorkflowStatus.FAILED
             )
 
+            # Persist final state
+            if wf_store:
+                try:
+                    wf_store.update_workflow_status(workflow.status.value)
+                except Exception as e:
+                    logger.error(f"Failed to persist workflow status: {e}")
+
             # Persist output if adapter is available
             if self._domain_adapter and output.status in _SUCCESS_STATUSES:
                 try:
@@ -284,6 +344,11 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"Workflow {workflow.workflow_id} failed: {e}", exc_info=True)
             workflow.status = WorkflowStatus.FAILED
+            if wf_store:
+                try:
+                    wf_store.update_workflow_status("failed")
+                except Exception:
+                    pass
             raise
 
         finally:
@@ -345,6 +410,7 @@ class Orchestrator:
         workflow: WorkflowExecution,
         trace_store: TraceStore,
         roles_description: str,
+        wf_store: Optional[WorkflowFileStore] = None,
     ) -> ToolResult:
         """
         Handle orchestrator-level tool calls (spawn_agent, wait_for_agents, etc.).
@@ -368,6 +434,7 @@ class Orchestrator:
         try:
             return await handler(
                 tool_call, parent_node, workflow, trace_store, roles_description,
+                wf_store,
             )
         except BudgetExceededException as e:
             return ToolResult(
@@ -395,6 +462,7 @@ class Orchestrator:
         workflow: WorkflowExecution,
         trace_store: TraceStore,
         roles_description: str,
+        wf_store: Optional[WorkflowFileStore] = None,
     ) -> ToolResult:
         """Handle spawn_agent tool call.
 
@@ -524,6 +592,40 @@ class Orchestrator:
         if max_child_reviews is None:
             max_child_reviews = 1
         child_review_cycles = min(self._max_review_cycles, max_child_reviews)
+
+        # Set up child file store (nested under parent)
+        child_file_store: Optional[AgentFileStore] = None
+        if wf_store:
+            try:
+                child_file_store = wf_store.create_child_store(
+                    parent_task_id=parent_node.task_id,
+                    child_task_id=child_node.task_id,
+                    role=role,
+                )
+                child_file_store.save_agent_info(
+                    task_id=child_node.task_id,
+                    agent_id=child_config.agent_id,
+                    role=role,
+                    sub_role=sub_role,
+                    task=task_description[:500],
+                    status="running",
+                    depth=child_node.depth,
+                    parent_task_id=parent_node.task_id,
+                    model=child_config.model,
+                )
+                # Register child in parent's sub_agents.json
+                parent_store = wf_store.get_store(parent_node.task_id)
+                if parent_store:
+                    parent_store.register_child(
+                        task_id=child_node.task_id,
+                        agent_id=child_config.agent_id,
+                        role=role,
+                        sub_role=sub_role,
+                        task_description=task_description,
+                    )
+            except Exception as e:
+                logger.error(f"Failed to persist child agent info: {e}", exc_info=True)
+
         child_runtime = AgentRuntime(
             llm=self._llm,
             budget_tracker=self._budget_tracker,
@@ -535,6 +637,7 @@ class Orchestrator:
             stream=self._stream,
             stall_config=self._stall_config,
             budget_config=child_budget,
+            agent_file_store=child_file_store,
         )
 
         # Launch child execution as a background task so the parent can
@@ -548,6 +651,7 @@ class Orchestrator:
                     workflow=workflow,
                     on_orchestrator_tool=lambda tc: self._handle_orchestrator_tool(
                         tc, child_node, workflow, trace_store, roles_description,
+                        wf_store,
                     ),
                 )
                 _child_success = output.status in ("completed", "degraded")
@@ -556,6 +660,17 @@ class Orchestrator:
                     AgentStatus.COMPLETED if _child_success else AgentStatus.FAILED,
                     output_summary=output.summary[:200],
                 )
+                # Update child status in parent's sub_agents.json
+                if wf_store:
+                    try:
+                        parent_store = wf_store.get_store(parent_node.task_id)
+                        if parent_store:
+                            parent_store.update_child_status(
+                                child_node.task_id,
+                                "completed" if _child_success else "failed",
+                            )
+                    except Exception:
+                        pass
                 return output
             except Exception as e:
                 logger.error(
@@ -567,6 +682,15 @@ class Orchestrator:
                     AgentStatus.FAILED,
                     output_summary=str(e)[:200],
                 )
+                if wf_store:
+                    try:
+                        parent_store = wf_store.get_store(parent_node.task_id)
+                        if parent_store:
+                            parent_store.update_child_status(
+                                child_node.task_id, "failed",
+                            )
+                    except Exception:
+                        pass
                 raise
 
         task = asyncio.create_task(
@@ -599,6 +723,7 @@ class Orchestrator:
         workflow: WorkflowExecution,
         trace_store: TraceStore,
         roles_description: str,
+        wf_store: Optional[WorkflowFileStore] = None,
     ) -> ToolResult:
         """Handle wait_for_agents tool call.
 
@@ -709,6 +834,7 @@ class Orchestrator:
         workflow: WorkflowExecution,
         trace_store: TraceStore,
         roles_description: str,
+        wf_store: Optional[WorkflowFileStore] = None,
     ) -> ToolResult:
         """Handle get_agent_result tool call."""
         task_id = tool_call.arguments.get("task_id", "")
@@ -751,6 +877,7 @@ class Orchestrator:
         workflow: WorkflowExecution,
         trace_store: TraceStore,
         roles_description: str,
+        wf_store: Optional[WorkflowFileStore] = None,
     ) -> ToolResult:
         """Handle get_agent_results_all tool call."""
         results = {}
