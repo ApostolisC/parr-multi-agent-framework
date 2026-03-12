@@ -36,7 +36,7 @@ class EventBus:
     Supports workflow-scoped subscriptions. Events are dispatched to all
     subscribers for the matching workflow_id.
 
-    Thread-safe for concurrent publish/subscribe via asyncio.Lock.
+    Async-safe for concurrent publish/subscribe via asyncio.Lock.
     """
 
     def __init__(self) -> None:

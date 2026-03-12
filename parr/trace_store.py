@@ -39,7 +39,7 @@ class TraceStore:
         self._lock = asyncio.Lock()
 
     async def async_add_entry(self, entry: TraceEntry) -> None:
-        """Thread-safe version of add_entry."""
+        """Async-safe version of add_entry."""
         async with self._lock:
             self.add_entry(entry)
 
@@ -49,12 +49,12 @@ class TraceStore:
         status: AgentStatus,
         output_summary: Optional[str] = None,
     ) -> None:
-        """Thread-safe version of update_status."""
+        """Async-safe version of update_status."""
         async with self._lock:
             self.update_status(task_id, status, output_summary)
 
     async def async_add_child(self, parent_task_id: str, child_task_id: str) -> None:
-        """Thread-safe version of add_child."""
+        """Async-safe version of add_child."""
         async with self._lock:
             self.add_child(parent_task_id, child_task_id)
 
