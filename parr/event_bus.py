@@ -35,15 +35,19 @@ class EventBus:
 
     Supports workflow-scoped subscriptions. Events are dispatched to all
     subscribers for the matching workflow_id.
+
+    Async-safe for concurrent publish/subscribe via asyncio.Lock.
     """
 
     def __init__(self) -> None:
         self._subscriptions: Dict[str, List[Subscription]] = {}
         self._next_id: int = 0
+        self._lock = asyncio.Lock()
 
     async def publish(self, event: FrameworkEvent) -> None:
         """Publish an event to all subscribers for this workflow."""
-        subs = self._subscriptions.get(event.workflow_id, [])
+        async with self._lock:
+            subs = list(self._subscriptions.get(event.workflow_id, []))
         for sub in subs:
             try:
                 await sub.handler(event)

@@ -5,10 +5,14 @@ Append-only, read-only for agents. Only the orchestrator writes to the trace.
 Agents receive trace snapshots — they never modify the trace directly.
 
 In-memory for v1. Persistence to DB is an adapter concern for later.
+
+Operations are protected by an asyncio.Lock for safe concurrent access
+from multiple agent tasks within the same workflow.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Dict, List, Optional
 
@@ -24,11 +28,35 @@ class TraceStore:
     Provides a complete, ordered record of all agent activity within
     a workflow execution. Used for observability, debugging, and
     providing context to agents about their siblings' work.
+
+    All mutating operations are protected by an asyncio.Lock so that
+    concurrent agent tasks within the same workflow do not corrupt state.
     """
 
     def __init__(self) -> None:
         self._entries: Dict[str, TraceEntry] = {}  # task_id -> entry
         self._order: List[str] = []  # insertion order
+        self._lock = asyncio.Lock()
+
+    async def async_add_entry(self, entry: TraceEntry) -> None:
+        """Async-safe version of add_entry."""
+        async with self._lock:
+            self.add_entry(entry)
+
+    async def async_update_status(
+        self,
+        task_id: str,
+        status: AgentStatus,
+        output_summary: Optional[str] = None,
+    ) -> None:
+        """Async-safe version of update_status."""
+        async with self._lock:
+            self.update_status(task_id, status, output_summary)
+
+    async def async_add_child(self, parent_task_id: str, child_task_id: str) -> None:
+        """Async-safe version of add_child."""
+        async with self._lock:
+            self.add_child(parent_task_id, child_task_id)
 
     def add_entry(self, entry: TraceEntry) -> None:
         """
