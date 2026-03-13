@@ -1,0 +1,30 @@
+[
+  {
+    "index": 0,
+    "description": "Research and outline a pentest methodology for WiFi networks.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Research and outline a pentest methodology for web applications.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Spawn a sub-agent for WiFi pentest methodology research.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Spawn a sub-agent for web application pentest methodology research.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  }
+]

@@ -1,0 +1,22 @@
+[
+  {
+    "criterion": "Does the collected data/analysis address the original task fully?",
+    "rating": "pass",
+    "justification": "The execution summary provides a clear and structured list of the phases of a DPIA, directly answering the question."
+  },
+  {
+    "criterion": "Are there gaps, contradictions, or areas where quality is insufficient?",
+    "rating": "pass",
+    "justification": "There are no gaps or contradictions; the phases are logically ordered and accurately described."
+  },
+  {
+    "criterion": "Were any tools or sub-agents that failed critical to the task?",
+    "rating": "pass",
+    "justification": "No tools or sub-agents failed; the answer was provided directly and is sufficient."
+  },
+  {
+    "criterion": "Is the quality of findings sufficient for reporting?",
+    "rating": "pass",
+    "justification": "The summary is concise, accurate, and provides necessary context for understanding the DPIA phases."
+  }
+]

@@ -1,0 +1,11 @@
+{
+  "task_id": "fff2c6f4-5910-47e6-995b-bfafc9e12b87",
+  "agent_id": "0cceebb4-8a43-4dae-8271-1a62bca6f113",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Research the reconnaissance phase in WiFi pentesting, including tools and techniques used.",
+  "status": "failed",
+  "depth": 2,
+  "parent_task_id": "d6d66704-b2ee-49a4-a63c-c5f2b3a293cb",
+  "model": "gpt-4o-mini"
+}

@@ -1,0 +1,37 @@
+[
+  {
+    "index": 0,
+    "description": "Research and compile a list of tools used for scanning WiFi networks for vulnerabilities.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Identify common methods employed in the scanning phase of WiFi networks.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Gather case studies or examples of vulnerabilities discovered through WiFi scanning.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Analyze the effectiveness of different tools and methods in identifying vulnerabilities.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 4,
+    "description": "Compile findings into a structured report with references.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  }
+]

@@ -1,0 +1,37 @@
+[
+  {
+    "index": 0,
+    "description": "Research the reconnaissance phase in WiFi pentesting, including tools and techniques used.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Investigate the scanning phase for WiFi networks, focusing on tools and methods for identifying vulnerabilities.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Explore the exploitation phase in WiFi pentesting, detailing common attacks and exploitation techniques.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Examine the reporting phase, outlining how to document findings and create a comprehensive report.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 4,
+    "description": "Compile all findings into a structured outline of the pentest methodology for WiFi networks.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  }
+]

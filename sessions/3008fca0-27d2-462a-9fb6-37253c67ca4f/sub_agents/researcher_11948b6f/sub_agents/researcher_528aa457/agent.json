@@ -1,0 +1,11 @@
+{
+  "task_id": "528aa457-2afd-44d8-a5e6-54c15faf10eb",
+  "agent_id": "2d138ee6-bf21-4f51-b81f-4bae6a2f0a32",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Research best practices for conducting WiFi penetration tests, including legal and ethical considerations.",
+  "status": "failed",
+  "depth": 2,
+  "parent_task_id": "11948b6f-7a62-4bda-b7b2-978021f9e22d",
+  "model": "gpt-4o-mini"
+}

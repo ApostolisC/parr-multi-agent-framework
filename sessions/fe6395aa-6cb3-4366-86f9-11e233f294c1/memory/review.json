@@ -1,0 +1,22 @@
+[
+  {
+    "criterion": "Does the collected data/analysis address the original task fully?",
+    "rating": "pass",
+    "justification": "The findings directly answer the question by listing the DPIA phases from both the ICO and EDPB, which are authoritative sources. Context and explanations are also provided."
+  },
+  {
+    "criterion": "Are there gaps, contradictions, or areas where quality is insufficient?",
+    "rating": "pass",
+    "justification": "No gaps or contradictions are present. Both sets of phases are clearly listed and explained, with sources cited."
+  },
+  {
+    "criterion": "Were any tools or sub-agents that failed critical to the task?",
+    "rating": "pass",
+    "justification": "No evidence of failed tools or sub-agents. All steps were completed as required."
+  },
+  {
+    "criterion": "Is the quality of findings sufficient for reporting?",
+    "rating": "pass",
+    "justification": "Findings are clear, well-structured, and sufficiently detailed for reporting. Authoritative sources are cited, and context is provided."
+  }
+]

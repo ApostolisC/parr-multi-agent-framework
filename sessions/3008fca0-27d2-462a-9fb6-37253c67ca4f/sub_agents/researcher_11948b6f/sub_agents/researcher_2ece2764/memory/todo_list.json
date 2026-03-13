@@ -1,0 +1,37 @@
+[
+  {
+    "index": 0,
+    "description": "Research and compile techniques used in the reconnaissance phase of WiFi penetration testing.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "No findings available for reconnaissance techniques in WiFi penetration testing."
+  },
+  {
+    "index": 1,
+    "description": "Research and compile techniques used in the scanning phase of WiFi penetration testing.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "No findings available for scanning techniques in WiFi penetration testing."
+  },
+  {
+    "index": 2,
+    "description": "Research and compile techniques used in the exploitation phase of WiFi penetration testing.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "No findings available for exploitation techniques in WiFi penetration testing."
+  },
+  {
+    "index": 3,
+    "description": "Research and compile techniques used in the post-exploitation phase of WiFi penetration testing.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "No findings available for post-exploitation techniques in WiFi penetration testing."
+  },
+  {
+    "index": 4,
+    "description": "Research and compile techniques used in the reporting phase of WiFi penetration testing.",
+    "priority": "medium",
+    "completed": true,
+    "completion_summary": "No relevant findings were found for techniques used in the reporting phase of WiFi penetration testing."
+  }
+]

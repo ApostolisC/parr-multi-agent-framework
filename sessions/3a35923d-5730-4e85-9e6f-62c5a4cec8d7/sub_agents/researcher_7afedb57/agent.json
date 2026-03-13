@@ -1,0 +1,11 @@
+{
+  "task_id": "7afedb57-08a2-4b20-ab16-e63cb9f9fb8c",
+  "agent_id": "f8f8d864-ae98-477f-9fe9-85817b7e9856",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "Investigate common tools and techniques used in WiFi penetration testing.",
+  "status": "failed",
+  "depth": 1,
+  "parent_task_id": "494574f7-d5da-4198-b966-88bbd330c7b9",
+  "model": "gpt-4o-mini"
+}

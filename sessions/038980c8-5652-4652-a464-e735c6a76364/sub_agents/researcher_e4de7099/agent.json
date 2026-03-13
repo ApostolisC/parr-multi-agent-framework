@@ -1,0 +1,11 @@
+{
+  "task_id": "e4de7099-6fab-4978-8031-dc24a98b7b3c",
+  "agent_id": "c42060c1-22ce-45da-a414-edac92ca7391",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "Identify the legal requirements for conducting a DPIA under the GDPR.",
+  "status": "running",
+  "depth": 1,
+  "parent_task_id": "8de8ca0d-4b36-4486-b270-b6c588c345d3",
+  "model": "gpt-4o-mini"
+}

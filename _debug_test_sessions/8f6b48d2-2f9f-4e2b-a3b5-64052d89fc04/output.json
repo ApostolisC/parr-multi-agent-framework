@@ -1,0 +1,44 @@
+{
+  "task_id": "41b2639a-4fd6-4c1d-b5df-d7de3445fd9b",
+  "agent_id": "a8e5d97c-d4f4-4c8e-8602-fc34d54dd469",
+  "role": "researcher",
+  "status": "failed",
+  "summary": "Agent failed during plan phase — hit iteration limit without producing actionable plan.",
+  "findings": {},
+  "artifacts": [],
+  "errors": [
+    {
+      "source": "agent",
+      "error_type": "StallDetected",
+      "message": "Plan phase hit iteration limit (5). Agent may be stuck in a loop.",
+      "name": "stall_error"
+    },
+    {
+      "source": "system",
+      "error_type": "BudgetWarning",
+      "message": "Used 8500/10000 tokens (85%) before failure.",
+      "name": "budget_warning"
+    }
+  ],
+  "recommendations": [
+    "Increase plan phase iteration limit",
+    "Improve system prompt specificity"
+  ],
+  "token_usage": {
+    "input_tokens": 6200,
+    "output_tokens": 2300,
+    "total_tokens": 8500,
+    "total_cost": 0.112
+  },
+  "execution_metadata": {
+    "phases_completed": [
+      "plan"
+    ],
+    "iterations_per_phase": {
+      "plan": 5
+    },
+    "sub_agents_spawned": [],
+    "tools_called": [],
+    "total_duration_ms": 8900.0
+  }
+}

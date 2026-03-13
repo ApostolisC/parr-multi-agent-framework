@@ -1,0 +1,11 @@
+{
+  "task_id": "4a5295af-2faf-4a15-8e9e-47a8986ed853",
+  "agent_id": "e55c43f7-3d74-4c15-9d2b-46675b087054",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "Identify the key components of a DPIA process.",
+  "status": "running",
+  "depth": 1,
+  "parent_task_id": "8f6ca2d1-3c2a-434c-a120-a99f91677b40",
+  "model": "gpt-4o-mini"
+}

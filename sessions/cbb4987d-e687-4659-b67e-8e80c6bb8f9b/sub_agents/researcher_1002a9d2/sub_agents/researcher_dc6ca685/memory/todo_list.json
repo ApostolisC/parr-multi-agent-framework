@@ -1,0 +1,37 @@
+[
+  {
+    "index": 0,
+    "description": "Identify and list common techniques used in the information gathering phase of web application pentesting.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Research and compile a list of tools commonly used for information gathering in web application pentesting.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Gather detailed evidence and data points on each technique and tool identified, including their effectiveness and use cases.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Organize findings into a structured format for analysis and reporting.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 4,
+    "description": "Prepare a summary report of the findings with references to sources used.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  }
+]

@@ -47,6 +47,7 @@ from .core_types import (
     ErrorSource,
     ExecutionMetadata,
     Phase,
+    SimpleQueryBypassConfig,
     StallDetectionConfig,
     ToolCall,
     ToolDef,
@@ -88,6 +89,7 @@ class Orchestrator:
         default_budget: Optional[BudgetConfig] = None,
         stream: bool = False,
         stall_config: Optional[StallDetectionConfig] = None,
+        simple_query_bypass: Optional[SimpleQueryBypassConfig] = None,
         wait_for_agents_timeout: Optional[float] = None,
         persist_dir: Optional[str] = None,
     ) -> None:
@@ -99,6 +101,7 @@ class Orchestrator:
         self._default_budget = default_budget or BudgetConfig()
         self._stream = stream
         self._stall_config = stall_config
+        self._simple_query_bypass = simple_query_bypass or SimpleQueryBypassConfig()
         self._wait_for_agents_timeout = wait_for_agents_timeout
         self._persist_dir = persist_dir
 
@@ -293,6 +296,7 @@ class Orchestrator:
                 report_template_handler=report_template_handler,
                 stream=self._stream,
                 stall_config=self._stall_config,
+                simple_query_bypass=self._simple_query_bypass,
                 budget_config=workflow_budget,
                 agent_file_store=root_store,
             )
@@ -636,6 +640,7 @@ class Orchestrator:
             report_template_handler=self._build_report_template_handler(),
             stream=self._stream,
             stall_config=self._stall_config,
+            simple_query_bypass=self._simple_query_bypass,
             budget_config=child_budget,
             agent_file_store=child_file_store,
         )
@@ -790,10 +795,28 @@ class Orchestrator:
                 ),
             )
 
+        # Check for failed/degraded children and inject recovery guidance
+        failed_ids = [
+            tid for tid, r in results.items()
+            if r.get("status") in ("failed", "degraded", "cancelled")
+        ]
+        content = json.dumps(results, indent=2, default=str)
+        if failed_ids:
+            recovery_pct = parent_node.budget.parent_recovery_budget_pct
+            content += (
+                f"\n\n[RECOVERY NOTICE] {len(failed_ids)} sub-agent(s) "
+                f"failed or returned degraded results: {failed_ids}. "
+                f"Approximately {recovery_pct:.0%} of the original budget "
+                f"was reserved for recovery. You may: (1) synthesize a "
+                f"response from partial/degraded results, (2) attempt the "
+                f"remaining work yourself, or (3) spawn a replacement agent "
+                f"with a narrower scope."
+            )
+
         return ToolResult(
             tool_call_id=tool_call.id,
             success=True,
-            content=json.dumps(results, indent=2, default=str),
+            content=content,
         )
 
     def _collect_child_result(

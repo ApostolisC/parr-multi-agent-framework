@@ -1,0 +1,37 @@
+[
+  {
+    "index": 0,
+    "description": "Search for documents and resources that detail the reconnaissance phase in WiFi pentesting.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Identify and list common tools used in the reconnaissance phase of WiFi pentesting.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Gather information on techniques employed during the reconnaissance phase in WiFi pentesting.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Compile findings into a structured analysis focusing on tools and techniques.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 4,
+    "description": "Cite all sources and references used in the analysis.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  }
+]

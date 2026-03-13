@@ -1,0 +1,11 @@
+{
+  "task_id": "f3bfca19-1183-4d3d-ba6b-4ea23136fcfa",
+  "agent_id": "9922df70-5e3a-40cd-beb4-13ff82a7cdb1",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Deep dive into GDPR Article 35 requirements for DPIAs",
+  "status": "running",
+  "depth": 1,
+  "parent_task_id": "11cb88a3-1ea1-4c20-a67d-66d4c254217d",
+  "model": "gpt-4o-mini"
+}

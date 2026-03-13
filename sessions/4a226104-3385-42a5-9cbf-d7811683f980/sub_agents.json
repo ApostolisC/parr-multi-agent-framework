@@ -1,0 +1,18 @@
+[
+  {
+    "task_id": "12acdbc7-b5eb-40e0-a2d6-27cb6172e5e0",
+    "agent_id": "104cc497-ae07-4a33-a768-9c8a6ed6a818",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Research and summarize what a Data Protection Impact Assessment (DPIA) is, including its purpose and key components.",
+    "status": "failed"
+  },
+  {
+    "task_id": "a52e33f5-bc48-4e05-b800-10260936f793",
+    "agent_id": "ac9da80d-562d-425c-b710-94e05659cbc5",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Investigate other methodologies related to data protection assessments, such as Privacy Impact Assessments (PIA), Risk Assessments, and Security Assessments.",
+    "status": "failed"
+  }
+]

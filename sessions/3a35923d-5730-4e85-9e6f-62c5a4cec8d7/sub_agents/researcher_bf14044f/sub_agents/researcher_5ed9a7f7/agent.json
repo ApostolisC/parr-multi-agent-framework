@@ -1,0 +1,11 @@
+{
+  "task_id": "5ed9a7f7-5a2f-4cbe-add7-886c997a0c7f",
+  "agent_id": "c4c826d2-5982-4871-a378-8eff2409d5fa",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Gather comprehensive information on best practices for conducting web application penetration tests, including references to the OWASP Testing Guide and other relevant resources.",
+  "status": "failed",
+  "depth": 2,
+  "parent_task_id": "bf14044f-6909-4fac-9ca2-20a8b3b8cf11",
+  "model": "gpt-4o-mini"
+}

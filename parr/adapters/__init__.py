@@ -8,6 +8,7 @@ adapters by registering its domain-specific data (roles, tools, schemas).
 Adapters:
     - OpenAIToolCallingLLM: ToolCallingLLM for OpenAI / Azure OpenAI APIs
     - AnthropicToolCallingLLM: ToolCallingLLM for Anthropic Claude API
+    - RateLimitedToolCallingLLM: FIFO queue + rate-limited wrapper for any ToolCallingLLM
     - create_tool_calling_llm: Factory for creating LLM adapters
     - ReferenceDomainAdapter: In-memory DomainAdapter with role registration
     - RAGDocumentSearchAdapter: DocumentSearchProvider wrapping a RAG service
@@ -22,6 +23,7 @@ from .llm_adapter import (
     OpenAIToolCallingLLM,
     create_tool_calling_llm,
 )
+from .llm_rate_limiter import RateLimitedToolCallingLLM
 from .domain_adapter import ReferenceDomainAdapter
 from .document_search_adapter import RAGDocumentSearchAdapter
 from .event_sink_adapter import (
@@ -35,6 +37,7 @@ __all__ = [
     "OpenAIToolCallingLLM",
     "AnthropicToolCallingLLM",
     "ContentFilterError",
+    "RateLimitedToolCallingLLM",
     "create_tool_calling_llm",
     # Domain adapter
     "ReferenceDomainAdapter",

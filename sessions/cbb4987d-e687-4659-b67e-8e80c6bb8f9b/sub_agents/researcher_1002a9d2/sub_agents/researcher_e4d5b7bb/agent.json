@@ -1,0 +1,11 @@
+{
+  "task_id": "e4d5b7bb-4b31-417e-93f4-77a68207023b",
+  "agent_id": "4fed393f-a34b-47bd-94bc-cb07a541d943",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Explore the exploitation phase, detailing techniques for exploiting vulnerabilities found in web applications.",
+  "status": "failed",
+  "depth": 2,
+  "parent_task_id": "1002a9d2-7d98-4b35-a48c-977348d262da",
+  "model": "gpt-4o-mini"
+}

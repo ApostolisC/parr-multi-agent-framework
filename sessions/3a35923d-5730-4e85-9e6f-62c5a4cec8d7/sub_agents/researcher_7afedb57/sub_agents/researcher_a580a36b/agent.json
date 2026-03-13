@@ -1,0 +1,11 @@
+{
+  "task_id": "a580a36b-616e-4682-a816-deed15a5b797",
+  "agent_id": "efdb7778-8400-46cb-984d-26bed9789311",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "Find case studies or real-world applications of WiFi penetration testing.",
+  "status": "failed",
+  "depth": 2,
+  "parent_task_id": "7afedb57-08a2-4b20-ab16-e63cb9f9fb8c",
+  "model": "gpt-4o-mini"
+}

@@ -1,0 +1,33 @@
+[
+  {
+    "name": "create_todo_list",
+    "phase": "plan",
+    "arguments": {
+      "items": [
+        {
+          "description": "Conduct a broad search for the definition of DPIA (Data Protection Impact Assessment).",
+          "priority": "high"
+        },
+        {
+          "description": "Identify the purpose of DPIA in data protection and privacy regulations.",
+          "priority": "high"
+        },
+        {
+          "description": "Gather examples of when a DPIA is required or recommended.",
+          "priority": "medium"
+        },
+        {
+          "description": "Look for best practices in conducting a DPIA.",
+          "priority": "medium"
+        },
+        {
+          "description": "Compile findings into a structured report summarizing the definition, purpose, examples, and best practices of DPIA.",
+          "priority": "high"
+        }
+      ]
+    },
+    "result_content": "Created todo list with 5 items.",
+    "success": true,
+    "error": null
+  }
+]

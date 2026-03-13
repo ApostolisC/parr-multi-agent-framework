@@ -1,0 +1,11 @@
+{
+  "task_id": "21d51b48-07e1-4793-a6f3-fbeca91a9061",
+  "agent_id": "8fe75a80-eb9e-4396-8cb1-eb0c487b7efb",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Research and outline the penetration testing methodology for WiFi networks.",
+  "status": "failed",
+  "depth": 1,
+  "parent_task_id": "494574f7-d5da-4198-b966-88bbd330c7b9",
+  "model": "gpt-4o-mini"
+}

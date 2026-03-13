@@ -1,0 +1,32 @@
+[
+  {
+    "category": "definition",
+    "content": "Data Protection Impact Assessment (DPIA) is a process designed to help organizations identify and minimize the data protection risks of a project. Key components include assessing the necessity and proportionality of data processing, identifying risks to individuals, and determining measures to mitigate those risks.",
+    "source": "EU Health Data Space Whitepaper 2025",
+    "confidence": "high"
+  },
+  {
+    "category": "purpose",
+    "content": "The purpose of a DPIA is to ensure that organizations comply with data protection regulations by identifying potential risks to personal data and implementing measures to mitigate those risks. It plays a crucial role in demonstrating accountability and transparency in data processing activities.",
+    "source": "EU AI Act Implementation Guide 2025",
+    "confidence": "high"
+  },
+  {
+    "category": "importance",
+    "content": "DPIAs are important for ensuring compliance with data protection laws, such as the GDPR, which mandates that organizations conduct DPIAs for high-risk processing activities. This helps protect individuals' rights and freedoms in relation to their personal data.",
+    "source": "EU AI Act Implementation Guide 2025",
+    "confidence": "high"
+  },
+  {
+    "category": "regulation",
+    "content": "The General Data Protection Regulation (GDPR) requires DPIAs for processing activities that are likely to result in a high risk to the rights and freedoms of individuals. Article 35 of the GDPR specifically mandates this assessment for such cases.",
+    "source": "EU Health Data Space Whitepaper 2025",
+    "confidence": "high"
+  },
+  {
+    "category": "case_study",
+    "content": "Organizations implementing DPIAs have reported improved risk management and compliance with data protection regulations. Case studies show that conducting a DPIA can lead to better project outcomes and enhanced trust from stakeholders.",
+    "source": "Lancet Digital Health, 2025",
+    "confidence": "medium"
+  }
+]

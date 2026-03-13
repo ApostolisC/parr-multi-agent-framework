@@ -1,0 +1,277 @@
+"""
+Launch the PARR Debug UI from the command line.
+
+Usage::
+
+    python -m parr.debug_ui --persist-dir ./sessions
+    python -m parr.debug_ui --persist-dir ./sessions --port 9090
+
+Enable session creation from the UI by pointing at a config directory::
+
+    python -m parr.debug_ui --persist-dir ./sessions \\
+        --config-dir ./examples/research_assistant/config
+
+Full workflow with real domain tools (searches, reads, etc.)::
+
+    python -m parr.debug_ui --persist-dir ./sessions \\
+        --config-dir ./examples/research_assistant/config \\
+        --tools-module examples.research_assistant.run
+"""
+
+import argparse
+import importlib
+import logging
+
+from parr.core_types import ToolDef
+
+from .server import start_server
+
+logger = logging.getLogger(__name__)
+
+
+def _discover_tools_from_module(module_path: str) -> dict[str, ToolDef]:
+    """
+    Import *module_path* and collect every module-level ``ToolDef`` instance.
+
+    Returns a ``{name: ToolDef}`` dict suitable for ``tool_registry``.
+    """
+    mod = importlib.import_module(module_path)
+    tools: dict[str, ToolDef] = {}
+    for attr_name in dir(mod):
+        obj = getattr(mod, attr_name)
+        if isinstance(obj, ToolDef) and obj.handler is not None:
+            tools[obj.name] = obj
+            logger.info(f"Discovered tool '{obj.name}' from {module_path}")
+    return tools
+
+
+def _build_workflow_runner(
+    config_dir: str,
+    persist_dir: str,
+    provider: str | None,
+    model: str | None,
+    tools_module: str | None = None,
+):
+    """
+    Build an async workflow runner from a config directory.
+
+    Returns ``(runner_func, available_roles)`` where *runner_func* is an
+    ``async (task, role) -> AgentOutput`` callable and *available_roles*
+    is the list of role names extracted from ``roles.yaml``.
+    """
+    from pathlib import Path
+
+    import yaml
+
+    from parr.config import create_orchestrator_from_config
+
+    config_path = Path(config_dir).resolve()
+
+    # Extract role names directly from roles.yaml (no validation needed)
+    roles_file = config_path / "roles.yaml"
+    available_roles: list[str] = []
+    if roles_file.exists():
+        data = yaml.safe_load(roles_file.read_text(encoding="utf-8")) or {}
+        available_roles = list(data.get("roles", {}).keys())
+
+    # Discover domain tools from the specified Python module
+    tool_registry: dict[str, ToolDef] | None = None
+    if tools_module:
+        tool_registry = _discover_tools_from_module(tools_module)
+        if tool_registry:
+            logger.info(f"Loaded {len(tool_registry)} tool(s) from {tools_module}: {list(tool_registry.keys())}")
+        else:
+            logger.warning(f"No ToolDef instances found in {tools_module}")
+
+    # Try to build orchestrator from config.
+    try:
+        orchestrator = create_orchestrator_from_config(
+            config_dir=config_dir,
+            tool_registry=tool_registry,
+            provider_override=provider,
+            model_override=model,
+        )
+    except Exception as e:
+        if tool_registry:
+            # Tools were provided but config still failed — don't silently fall back
+            raise
+        # Fall back: build a minimal orchestrator without tool validation
+        logger.warning(f"Full config load failed ({e}), building minimal orchestrator")
+        orchestrator = _build_minimal_orchestrator(config_path, provider, model)
+
+    # Point persistence at the same directory the UI reads from
+    orchestrator._persist_dir = persist_dir
+
+    async def runner(task: str, role: str):
+        return await orchestrator.start_workflow(task=task, role=role)
+
+    return runner, available_roles
+
+
+def _build_minimal_orchestrator(config_path, provider: str | None, model: str | None):
+    """Build an Orchestrator bypassing tool validation for CLI use."""
+    import json
+
+    from parr.orchestrator import Orchestrator
+    from parr.core_types import ToolDef
+    from parr.config.config_loader import (
+        _load_yaml,
+        _build_cost_config,
+        _build_budget_config,
+        _build_llm_rate_limit_config,
+        _build_phase_limits,
+        _build_stall_config,
+        _build_domain_adapter,
+        _load_providers,
+        build_llm_from_provider_config,
+    )
+
+    models_data = _load_yaml(config_path / "models.yaml")
+    budget_data = _load_yaml(config_path / "budget.yaml")
+    roles_data = _load_yaml(config_path / "roles.yaml")
+
+    raw_models = models_data.get("models", {})
+    raw_budget = budget_data.get("budget_defaults", {})
+    raw_phase_limits = budget_data.get("phase_limits", {})
+    raw_stall = budget_data.get("stall_detection", {})
+    raw_llm_rate_limit = budget_data.get("llm_rate_limit", {})
+    raw_roles = roles_data.get("roles", {})
+
+    cost_config = _build_cost_config(raw_models)
+    default_budget = _build_budget_config(raw_budget)
+    phase_limits = _build_phase_limits(raw_phase_limits)
+    stall_config = _build_stall_config(raw_stall) if raw_stall else None
+    llm_rate_limit = _build_llm_rate_limit_config(raw_llm_rate_limit)
+
+    # Collect all tool names referenced by roles and create stub ToolDefs
+    # so the domain adapter can load system prompts and output schemas
+    all_tool_names: set[str] = set()
+    for role_def in raw_roles.values():
+        for t in role_def.get("tools", []):
+            all_tool_names.add(t)
+        for sr_def in role_def.get("sub_roles", {}).values():
+            for t in sr_def.get("tools", []):
+                all_tool_names.add(t)
+
+    async def _stub_handler(**kwargs):
+        return json.dumps({"error": "Tool not available in debug UI mode. Domain tools require the full application entry point (e.g. run.py)."})
+
+    stub_registry = {
+        name: ToolDef(
+            name=name,
+            description=f"(stub — domain tool not available in CLI mode)",
+            parameters={"type": "object", "properties": {}},
+            handler=_stub_handler,
+        )
+        for name in all_tool_names
+    }
+
+    domain_adapter = _build_domain_adapter(
+        config_dir=config_path,
+        raw_roles=raw_roles,
+        tool_registry=stub_registry,
+    )
+
+    # Build LLM from providers.yaml
+    provider_config = _load_providers(config_path, provider)
+    if provider_config is None:
+        raise RuntimeError(
+            "No providers.yaml found in config directory. "
+            "Cannot auto-create LLM for workflow launching."
+        )
+    llm_model = model
+    if llm_model is None and cost_config.models:
+        llm_model = next(iter(cost_config.models))
+    if llm_model is None:
+        raise RuntimeError("No model specified and none found in models.yaml.")
+
+    llm = build_llm_from_provider_config(
+        provider_config=provider_config,
+        model=llm_model,
+        cost_config=cost_config,
+        llm_rate_limit=llm_rate_limit,
+    )
+
+    return Orchestrator(
+        llm=llm,
+        domain_adapter=domain_adapter,
+        cost_config=cost_config,
+        phase_limits=phase_limits,
+        default_budget=default_budget,
+        stall_config=stall_config,
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="PARR Debug UI — inspect persisted agent sessions",
+    )
+    parser.add_argument(
+        "--persist-dir",
+        required=True,
+        help="Path to the framework's persistence directory",
+    )
+    parser.add_argument(
+        "--config-dir",
+        default=None,
+        help="Path to a PARR config directory (roles.yaml, models.yaml, etc.) "
+             "to enable launching new sessions from the UI",
+    )
+    parser.add_argument(
+        "--host",
+        default="localhost",
+        help="Host to bind to (default: localhost)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="Port to listen on (default: 8080)",
+    )
+    parser.add_argument(
+        "--provider",
+        default=None,
+        help="Override default LLM provider (e.g. openai, anthropic)",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Override LLM model name (e.g. gpt-4o, claude-3-5-sonnet)",
+    )
+    parser.add_argument(
+        "--tools-module",
+        default=None,
+        help="Python module that defines ToolDef objects for domain tools. "
+             "e.g. examples.research_assistant.run — the module is imported "
+             "and all module-level ToolDef instances are registered automatically.",
+    )
+    args = parser.parse_args()
+
+    workflow_runner = None
+    available_roles = None
+
+    if args.config_dir:
+        try:
+            workflow_runner, available_roles = _build_workflow_runner(
+                config_dir=args.config_dir,
+                persist_dir=args.persist_dir,
+                provider=args.provider,
+                model=args.model,
+                tools_module=args.tools_module,
+            )
+            print(f"Workflow runner loaded from: {args.config_dir}")
+        except Exception as e:
+            logger.error(f"Failed to load config from {args.config_dir}: {e}", exc_info=True)
+            print(f"WARNING: Could not load config — session creation disabled.\n  Error: {e}")
+
+    start_server(
+        persist_dir=args.persist_dir,
+        host=args.host,
+        port=args.port,
+        workflow_runner=workflow_runner,
+        available_roles=available_roles,
+    )
+
+
+if __name__ == "__main__":
+    main()

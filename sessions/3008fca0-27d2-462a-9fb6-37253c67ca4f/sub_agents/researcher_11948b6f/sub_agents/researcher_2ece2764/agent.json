@@ -1,0 +1,11 @@
+{
+  "task_id": "2ece2764-826d-45ca-8177-7d140ca1e11d",
+  "agent_id": "c03d2eb2-7c5e-4b93-ab79-f11fa61fbf16",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Research and gather detailed techniques and tools used in each phase of WiFi penetration testing.",
+  "status": "completed",
+  "depth": 2,
+  "parent_task_id": "11948b6f-7a62-4bda-b7b2-978021f9e22d",
+  "model": "gpt-4o-mini"
+}

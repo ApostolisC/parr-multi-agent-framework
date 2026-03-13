@@ -1,0 +1,18 @@
+[
+  {
+    "task_id": "0b7cfc5d-d70e-498e-bbea-3d260c0123e1",
+    "agent_id": "a5d284b6-e158-4560-a95d-72a956cfb7b3",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Research the definition and purpose of a Data Protection Impact Assessment (DPIA), including its significance in data protection and compliance with regulations like GDPR.",
+    "status": "failed"
+  },
+  {
+    "task_id": "8cd74a6e-125a-4841-bc79-99dbbecf51c3",
+    "agent_id": "82c88bfb-5f73-443a-b9fb-372b13e964d7",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Identify and summarize other methodologies for data protection assessments beyond DPIAs.",
+    "status": "completed"
+  }
+]

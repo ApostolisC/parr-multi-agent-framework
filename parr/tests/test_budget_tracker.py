@@ -351,8 +351,9 @@ class TestCalculateChildBudget:
             consumed_tokens=200,
         )
         child_budget = budget_tracker.calculate_child_budget(parent)
-        # remaining = 800, fraction = 0.5 → 400
-        assert child_budget.max_tokens == 400
+        # remaining = 800, allocatable = 800 * 0.9 (10% recovery reserve) = 720
+        # child = 720 * 0.5 = 360
+        assert child_budget.max_tokens == 360
 
     def test_inherits_fraction_of_remaining_cost(self, budget_tracker):
         parent = _make_node(
@@ -360,7 +361,8 @@ class TestCalculateChildBudget:
             consumed_cost=4.0,
         )
         child_budget = budget_tracker.calculate_child_budget(parent)
-        assert child_budget.max_cost == pytest.approx(3.0)
+        # remaining = 6.0, allocatable = 6.0 * 0.9 = 5.4, child = 5.4 * 0.5 = 2.7
+        assert child_budget.max_cost == pytest.approx(2.7)
 
     def test_inherits_duration_unchanged(self, budget_tracker):
         parent = _make_node(
@@ -441,7 +443,8 @@ class TestCalculateChildBudget:
             consumed_tokens=0,
         )
         child_budget = budget_tracker.calculate_child_budget(parent)
-        assert child_budget.max_tokens == 250
+        # remaining = 1000, allocatable = 1000 * 0.9 = 900, child = 900 * 0.25 = 225
+        assert child_budget.max_tokens == 225
 
     def test_child_budget_sets_inherit_remaining_true(self, budget_tracker):
         parent = _make_node(

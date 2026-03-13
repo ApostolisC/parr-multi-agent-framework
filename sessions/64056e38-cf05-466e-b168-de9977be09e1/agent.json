@@ -1,0 +1,11 @@
+{
+  "task_id": "7281365e-1b2e-4ceb-bcaa-fd5badf04804",
+  "agent_id": "234f6684-1a1b-44d0-8a50-2da809df86c3",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "what is a data protection impact assessment? What other methodologies exist? Use subagents",
+  "status": "running",
+  "depth": 0,
+  "parent_task_id": null,
+  "model": "gpt-4o-mini"
+}

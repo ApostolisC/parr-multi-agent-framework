@@ -1,0 +1,20 @@
+[
+  {
+    "category": "gap",
+    "content": "No relevant documents found addressing the planning, scanning, gaining access, maintaining access, or reporting phases of WiFi penetration testing.",
+    "source": "Document search results",
+    "confidence": "high"
+  },
+  {
+    "category": "gap",
+    "content": "No relevant documents found addressing the planning, scanning, or reporting phases of WiFi penetration testing. Limited findings available for gaining access and maintaining access phases, primarily from a document not directly related to WiFi testing.",
+    "source": "Document search results",
+    "confidence": "high"
+  },
+  {
+    "category": "data_point",
+    "content": "The only relevant document retrieved discusses privacy risks in AI systems, which does not pertain to WiFi penetration testing methodologies.",
+    "source": "EU Health Data Space Whitepaper 2025",
+    "confidence": "low"
+  }
+]

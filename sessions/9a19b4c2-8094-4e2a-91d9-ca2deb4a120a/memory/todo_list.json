@@ -1,0 +1,30 @@
+[
+  {
+    "index": 0,
+    "description": "Research and summarize what a Data Protection Impact Assessment (DPIA) is, including its purpose and key components.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Investigate other methodologies for data protection assessments, including their definitions and key features.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Explore the legal requirements and guidelines surrounding DPIAs in different jurisdictions.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Identify and summarize best practices for conducting DPIAs.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  }
+]

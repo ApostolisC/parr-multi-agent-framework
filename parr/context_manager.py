@@ -41,75 +41,54 @@ PHASE_PROMPTS: Dict[Phase, str] = {
     Phase.PLAN: """
 --- Phase: Planning ---
 
-Your current task is to create a work plan. Follow these guidelines:
+Your current task is to create a practical plan for this assignment.
 
 1. Read the task carefully.
-2. If a plan has been provided, understand your role within it. Your personal
-   plan should fulfill your specific assignment in the broader plan.
-3. If no plan was provided, create your own plan to accomplish the task.
-4. Consider what data you have (raw_data, rag_results) and what you might
-   need to retrieve.
-5. Create a concrete, ordered todo list using the create_todo_list tool.
-   Each todo item should be a specific, actionable step.
+2. If a parent plan exists, align your work with your assigned scope.
+3. If no parent plan exists, define your own approach.
+4. Consider available data (raw_data, rag_results) and whether external
+   retrieval is actually needed.
+
+Tool usage policy:
+- For simple, direct questions you can answer with existing context and model
+  knowledge, keep planning lightweight and avoid unnecessary tool calls.
+- For multi-step or complex work, create a concrete ordered todo list with
+  create_todo_list. Each item should be specific and actionable.
+- If you create a todo list, call create_todo_list once, then summarize the
+  plan without extra tool calls.
 
 Workload planning:
-- If the task has many independent parts (e.g. 10+ items to research, multiple
-  documents to analyze), plan to delegate groups of work to sub-agents using
-  spawn_agent in the execution phase. Each sub-agent handles a chunk.
-- Group related items together — it is more efficient to give a sub-agent
-  5 related items than to spawn 5 separate agents.
-- Reserve yourself for coordination: gather sub-agent results, synthesize
-  findings, fill gaps, and produce the final report.
-- For smaller tasks (under ~5 items), do the work directly — sub-agent
-  overhead is not worthwhile.
-
-Guidelines:
-- Call create_todo_list once with all your planned steps, then respond with
-  your plan summary without calling additional tools.
-- There is no need to call get_todo_list after creating — the list is saved.
-- Keep the list stable; you will execute it in the next phase.
-- Focus only on planning during this phase, not on executing work.
+- If the task has many independent parts (for example 10+ items to research),
+  plan delegation in the execution phase via spawn_agent.
+- Group related items together for each sub-agent to reduce overhead.
+- For small tasks, do the work directly.
 """,
     Phase.ACT: """
 --- Phase: Execution ---
 
-Your current task is to work through the todo list step by step.
+Your current task is to complete the assignment efficiently and accurately.
 
-For each todo item:
-1. Perform the actual work: reason about the problem, use domain tools to
-   gather data if available, and produce your analysis.
-2. Record your results using log_finding (category, content, confidence).
-3. Mark the item complete using mark_todo_complete with a brief summary
-   of what you accomplished.
-4. Move to the next item.
+Execution policy:
+- First decide whether tools are necessary.
+- If the question is simple and the answer is already available from context,
+  provide the answer directly without tool calls.
+- Use tools only when they materially improve correctness, add required
+  evidence, or retrieve missing external information.
 
-Efficiency tips:
-- When you have multiple findings ready, use batch_log_findings to log
-  them all in one call instead of calling log_finding repeatedly.
-- When you have completed several items, use batch_mark_todo_complete to
-  mark them all done at once.
-- You can call multiple tools in a single response (e.g. a domain tool +
-  log_finding + mark_todo_complete). This saves iterations.
+When using a todo list:
+1. Work through items in order.
+2. Record key results with log_finding or batch_log_findings.
+3. Mark completion with mark_todo_complete or batch_mark_todo_complete.
 
 Delegation:
-- If a sub-task is complex enough to warrant a separate agent, use spawn_agent.
-  Give the sub-agent a clear task description and all the context it needs.
-- For large workloads with many independent items, spawn sub-agents to handle
-  chunks in parallel. For example, if you need to analyze 20 documents, spawn
-  sub-agents for groups of 5.
-- Sub-agent results are returned as structured data — use them directly in
-  your findings and report.
-- When you need a sub-agent's result before continuing, calling spawn_agent
-  blocks until the child completes. Plan your work order accordingly.
+- Use spawn_agent only for clearly complex or parallelizable sub-tasks.
+- Avoid spawning sub-agents for work you can complete directly with good quality.
 
 Guidelines:
-- Focus on doing the work rather than managing the todo list.
-- If a tool has failed, note the error and consider alternative approaches
-  rather than retrying the same call.
-- Keep the plan stable. If you discover gaps, note them as findings — the
-  review phase will decide if replanning is needed.
-- When all todo items are complete, respond with a summary of your work
-  without calling any tools. This ends the execution phase.
+- If a tool fails, note it and choose an alternative approach.
+- Keep momentum toward a final answer; avoid tool churn.
+- When the work is complete, respond with your execution summary and stop
+  calling tools.
 """,
     Phase.REVIEW: """
 --- Phase: Review ---
@@ -117,14 +96,14 @@ Guidelines:
 Your current task is to evaluate the work completed so far. Consider:
 
 1. Does the collected data/analysis address the original task fully?
-   Look at the findings (get_findings) — do they answer the question asked?
+   Look at the findings (get_findings) - do they answer the question asked?
 2. Are there gaps, contradictions, or areas where quality is insufficient?
 3. Were any tools or sub-agents that failed critical to the task?
 4. Is the quality of findings sufficient for reporting?
 
 Focus on whether the task was accomplished, not on process details like
 whether the todo list was properly managed. If the task asked for 3 items
-and findings contain 3 quality answers, that is a pass — regardless of
+and findings contain 3 quality answers, that is a pass - regardless of
 todo list state.
 
 Use the review_checklist tool to record your evaluation for each criterion.
@@ -132,24 +111,27 @@ Rate each: "pass", "partial", or "fail" with a brief justification.
 
 If all criteria pass, respond with "REVIEW_PASSED" and a brief summary.
 If criteria fail, respond with "REVIEW_FAILED" and specific descriptions
-of what needs to be redone. Evaluation only — no fixes in this phase.
+of what needs to be redone. Evaluation only - no fixes in this phase.
 """,
     Phase.REPORT: """
 --- Phase: Reporting ---
 
-Your current task is to synthesize your work into the required output format.
+Your current task is to produce the final deliverable.
 
-1. If a report template is available, call get_report_template to receive
-   the structural and formatting instructions for your deliverable.
-2. Call get_findings to retrieve all logged findings from execution.
-3. If you spawned sub-agents, call get_agent_results_all for their summaries.
-4. Compose your deliverable following any template structure provided.
-5. Submit your completed report using submit_report. Pass the report fields
-   directly as parameters (e.g. title, summary, findings, recommendations).
-   Pass them at the top level, not wrapped inside a "report" key.
+Reporting policy:
+- For straightforward tasks where you already have enough information, write
+  the final deliverable directly without unnecessary tool calls.
+- Use report tools only when they add value:
+  1. get_report_template when structural guidance is needed.
+  2. get_findings when you need stored findings.
+  3. get_agent_results_all when sub-agent summaries are needed.
 
-When the report is submitted, respond with a brief summary of the
-deliverable without calling any tools.
+If you use submit_report, pass report fields directly as top-level parameters
+(for example: title, summary, findings, recommendations), not inside a
+"report" object.
+
+After the deliverable is ready or submitted, respond with a concise summary
+without additional tool calls.
 """,
 }
 

@@ -1,0 +1,30 @@
+[
+  {
+    "index": 0,
+    "description": "Research and outline the pentest methodology for WiFi networks.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Research and outline the pentest methodology for web applications.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Investigate common tools and techniques used in WiFi pentesting.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Investigate common tools and techniques used in web application pentesting.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  }
+]

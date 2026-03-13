@@ -1,0 +1,11 @@
+{
+  "task_id": "20fe6eeb-e61c-4346-a5c4-e9ae7922555c",
+  "agent_id": "a6c798f8-9eaa-4fe7-97bc-818a33e81b33",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "Research general risks associated with security assessments.",
+  "status": "running",
+  "depth": 1,
+  "parent_task_id": "606beff0-be89-4e10-b59f-af5e5c0356cc",
+  "model": "gpt-4o-mini"
+}

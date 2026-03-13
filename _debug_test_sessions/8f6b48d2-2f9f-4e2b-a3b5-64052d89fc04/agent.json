@@ -1,0 +1,11 @@
+{
+  "task_id": "41b2639a-4fd6-4c1d-b5df-d7de3445fd9b",
+  "agent_id": "e660a4c2-9680-42b0-a2ac-aee436ea602b",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "Quick survey of quantum computing applications.",
+  "status": "failed",
+  "depth": 0,
+  "parent_task_id": null,
+  "model": "gpt-4o"
+}

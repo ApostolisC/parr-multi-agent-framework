@@ -1,0 +1,62 @@
+[
+  {
+    "name": "create_todo_list",
+    "success": true,
+    "error": null
+  },
+  {
+    "name": "search_documents",
+    "success": false,
+    "error": "Tool 'search_documents' has no handler registered."
+  },
+  {
+    "name": "search_documents",
+    "success": false,
+    "error": "Tool 'search_documents' has no handler registered."
+  },
+  {
+    "name": "get_todo_list",
+    "success": true,
+    "error": null
+  },
+  {
+    "name": "get_findings",
+    "success": true,
+    "error": null
+  },
+  {
+    "name": "get_findings",
+    "success": true,
+    "error": null
+  },
+  {
+    "name": "search_documents",
+    "success": false,
+    "error": "Tool 'search_documents' has no handler registered."
+  },
+  {
+    "name": "get_todo_list",
+    "success": true,
+    "error": null
+  },
+  {
+    "name": "log_finding",
+    "success": true,
+    "error": null
+  },
+  {
+    "name": "log_finding",
+    "success": true,
+    "error": null
+  },
+  {
+    "name": "log_finding",
+    "success": true,
+    "error": null
+  },
+  {
+    "name": "mark_todo_complete",
+    "success": true,
+    "error": null
+  }
+]

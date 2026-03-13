@@ -1,0 +1,11 @@
+{
+  "task_id": "fbb25967-baf3-4e99-8ff6-2ecc133896b9",
+  "agent_id": "46d00f60-e75c-4687-bf42-1e181aa91cd5",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Conduct a detailed analysis of the key phases of penetration testing specific to web applications, including information on common tools and techniques used, and the relevance of the OWASP Testing Guide.",
+  "status": "failed",
+  "depth": 2,
+  "parent_task_id": "bf14044f-6909-4fac-9ca2-20a8b3b8cf11",
+  "model": "gpt-4o-mini"
+}

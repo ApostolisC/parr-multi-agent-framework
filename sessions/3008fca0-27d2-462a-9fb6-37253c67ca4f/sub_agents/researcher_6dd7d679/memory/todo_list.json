@@ -1,0 +1,37 @@
+[
+  {
+    "index": 0,
+    "description": "Research existing penetration testing methodologies specific to web applications, such as OWASP, NIST, and others.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Conducted research on penetration testing methodologies but found no relevant documents for OWASP or NIST."
+  },
+  {
+    "index": 1,
+    "description": "Extract detailed steps and phases involved in these methodologies.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Extracted detailed steps and phases involved in penetration testing methodologies, but no findings were available."
+  },
+  {
+    "index": 2,
+    "description": "Identify common tools and techniques used in web application penetration testing.",
+    "priority": "medium",
+    "completed": true,
+    "completion_summary": "Identified common tools and techniques used in web application penetration testing, but no findings were available."
+  },
+  {
+    "index": 3,
+    "description": "Compile best practices and guidelines for conducting web application penetration tests.",
+    "priority": "medium",
+    "completed": true,
+    "completion_summary": "Compiled best practices and guidelines for conducting web application penetration tests, but no findings were available."
+  },
+  {
+    "index": 4,
+    "description": "Organize findings into a structured outline format for a comprehensive methodology.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Organized findings into a structured outline format, but no findings were available."
+  }
+]

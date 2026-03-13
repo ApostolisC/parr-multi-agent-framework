@@ -1,0 +1,34 @@
+[
+  {
+    "task_id": "15cd5b50-0321-44df-82f7-6c2c1bfcfe19",
+    "agent_id": "69b38214-a134-449a-a386-a4410d2778a6",
+    "role": "researcher",
+    "sub_role": null,
+    "task_description": "Conduct broad research on WiFi penetration testing, gathering general information, tools, and techniques used in the field.",
+    "status": "failed"
+  },
+  {
+    "task_id": "6dad92c1-f450-47a2-bfa3-9b99e4e23fc9",
+    "agent_id": "27a0741c-e21d-466c-85cd-934ed41f7481",
+    "role": "researcher",
+    "sub_role": null,
+    "task_description": "Identify and list commonly used tools in WiFi penetration testing, focusing on tools like Aircrack-ng, Kismet, and others.",
+    "status": "failed"
+  },
+  {
+    "task_id": "723374c9-005e-474b-8b77-4d2613fdc499",
+    "agent_id": "d19ecbe5-d2b2-467f-b0d0-bf7c5aa4d567",
+    "role": "researcher",
+    "sub_role": null,
+    "task_description": "Investigate techniques used in WiFi penetration testing, looking into methods like packet sniffing, man-in-the-middle, and others.",
+    "status": "failed"
+  },
+  {
+    "task_id": "a580a36b-616e-4682-a816-deed15a5b797",
+    "agent_id": "efdb7778-8400-46cb-984d-26bed9789311",
+    "role": "researcher",
+    "sub_role": null,
+    "task_description": "Find case studies or real-world applications of WiFi penetration testing.",
+    "status": "failed"
+  }
+]

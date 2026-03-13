@@ -1,0 +1,22 @@
+[
+  {
+    "criterion": "Does the collected data/analysis address the original task fully?",
+    "rating": "pass",
+    "justification": "The findings provide a clear definition, purpose, and importance of DPIA, fully addressing the task."
+  },
+  {
+    "criterion": "Are there gaps, contradictions, or areas where quality is insufficient?",
+    "rating": "partial",
+    "justification": "While the findings are relevant and well-logged, there could be additional sources and examples to enhance understanding."
+  },
+  {
+    "criterion": "Were any tools or sub-agents that failed critical to the task?",
+    "rating": "pass",
+    "justification": "No tools or sub-agents failed; all tasks were completed as planned."
+  },
+  {
+    "criterion": "Is the quality of findings sufficient for reporting?",
+    "rating": "partial",
+    "justification": "The findings are of good quality, but more detailed sources and context would strengthen the report."
+  }
+]

@@ -87,7 +87,9 @@ def validate_config(
     models: Dict[str, Dict[str, Any]],
     budget: Dict[str, Any],
     phase_limits: Dict[str, Any],
+    llm_rate_limit: Optional[Dict[str, Any]],
     tool_names: List[str],
+    simple_query_bypass: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """
     Validate all config cross-references and required fields.
@@ -98,6 +100,8 @@ def validate_config(
         models: Parsed models dict from models.yaml.
         budget: Parsed budget_defaults dict from budget.yaml.
         phase_limits: Parsed phase_limits dict from budget.yaml.
+        llm_rate_limit: Parsed llm_rate_limit dict from budget.yaml.
+        simple_query_bypass: Parsed simple_query_bypass dict from budget.yaml.
         tool_names: List of available tool names from the tool registry.
 
     Returns:
@@ -125,6 +129,8 @@ def validate_config(
 
     # -- Validate budget defaults --------------------------------------------
     _validate_budget(budget, errors)
+    _validate_llm_rate_limit(llm_rate_limit or {}, errors)
+    _validate_simple_query_bypass(simple_query_bypass or {}, errors)
 
     # -- Validate each role --------------------------------------------------
     for role_name, role_def in roles.items():
@@ -277,6 +283,148 @@ def _validate_model_config(
         errors.append(
             f"{context} model_config.max_tokens must be a positive integer, "
             f"got {max_tokens!r}"
+        )
+
+
+def _validate_llm_rate_limit(raw: Dict[str, Any], errors: List[str]) -> None:
+    """Validate llm_rate_limit section in budget.yaml."""
+    if not raw:
+        return
+
+    ctx = "llm_rate_limit"
+    if not isinstance(raw, dict):
+        errors.append(f"{ctx} must be a mapping/object, got {type(raw).__name__}")
+        return
+
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        errors.append(f"{ctx}.enabled must be a boolean, got {enabled!r}")
+
+    max_concurrent = raw.get("max_concurrent_requests")
+    if max_concurrent is not None and (not isinstance(max_concurrent, int) or max_concurrent < 1):
+        errors.append(
+            f"{ctx}.max_concurrent_requests must be a positive integer, got {max_concurrent!r}"
+        )
+
+    max_per_window = raw.get("max_requests_per_window")
+    max_per_minute = raw.get("max_requests_per_minute")
+    if max_per_window is not None and (not isinstance(max_per_window, int) or max_per_window < 1):
+        errors.append(
+            f"{ctx}.max_requests_per_window must be a positive integer, got {max_per_window!r}"
+        )
+    if max_per_minute is not None and (not isinstance(max_per_minute, int) or max_per_minute < 1):
+        errors.append(
+            f"{ctx}.max_requests_per_minute must be a positive integer, got {max_per_minute!r}"
+        )
+    if max_per_window is not None and max_per_minute is not None:
+        errors.append(
+            f"{ctx} must set only one of 'max_requests_per_window' or "
+            f"'max_requests_per_minute'"
+        )
+
+    max_tokens_window = raw.get("max_tokens_per_window")
+    max_tokens_minute = raw.get("max_tokens_per_minute")
+    if max_tokens_window is not None and (
+        not isinstance(max_tokens_window, int) or max_tokens_window < 1
+    ):
+        errors.append(
+            f"{ctx}.max_tokens_per_window must be a positive integer, got {max_tokens_window!r}"
+        )
+    if max_tokens_minute is not None and (
+        not isinstance(max_tokens_minute, int) or max_tokens_minute < 1
+    ):
+        errors.append(
+            f"{ctx}.max_tokens_per_minute must be a positive integer, got {max_tokens_minute!r}"
+        )
+    if max_tokens_window is not None and max_tokens_minute is not None:
+        errors.append(
+            f"{ctx} must set only one of 'max_tokens_per_window' or "
+            f"'max_tokens_per_minute'"
+        )
+
+    window_seconds = raw.get("window_seconds")
+    if window_seconds is not None and (
+        not isinstance(window_seconds, (int, float)) or window_seconds <= 0
+    ):
+        errors.append(
+            f"{ctx}.window_seconds must be a positive number, got {window_seconds!r}"
+        )
+
+    max_queue_size = raw.get("max_queue_size")
+    if max_queue_size is not None and (not isinstance(max_queue_size, int) or max_queue_size < 1):
+        errors.append(
+            f"{ctx}.max_queue_size must be a positive integer, got {max_queue_size!r}"
+        )
+
+    acquire_timeout = raw.get("acquire_timeout_seconds")
+    if acquire_timeout is not None and (
+        not isinstance(acquire_timeout, (int, float)) or acquire_timeout <= 0
+    ):
+        errors.append(
+            f"{ctx}.acquire_timeout_seconds must be a positive number, "
+            f"got {acquire_timeout!r}"
+        )
+
+    has_limit = any(
+        raw.get(name) is not None
+        for name in (
+            "max_concurrent_requests",
+            "max_requests_per_window",
+            "max_requests_per_minute",
+            "max_tokens_per_window",
+            "max_tokens_per_minute",
+        )
+    )
+    if enabled and not has_limit:
+        errors.append(
+            f"{ctx} is enabled but no limits are configured. Set at least one of "
+            f"'max_concurrent_requests', 'max_requests_per_window', "
+            f"or 'max_requests_per_minute'."
+        )
+
+
+def _validate_simple_query_bypass(raw: Dict[str, Any], errors: List[str]) -> None:
+    """Validate simple_query_bypass section in budget.yaml."""
+    if not raw:
+        return
+
+    ctx = "simple_query_bypass"
+    if not isinstance(raw, dict):
+        errors.append(f"{ctx} must be a mapping/object, got {type(raw).__name__}")
+        return
+
+    enabled = raw.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        errors.append(f"{ctx}.enabled must be a boolean, got {enabled!r}")
+
+    threshold = raw.get("route_confidence_threshold")
+    if threshold is not None and (
+        not isinstance(threshold, (int, float)) or threshold < 0 or threshold > 1
+    ):
+        errors.append(
+            f"{ctx}.route_confidence_threshold must be between 0 and 1, got {threshold!r}"
+        )
+
+    force_schema = raw.get("force_full_workflow_if_output_schema")
+    if force_schema is not None and not isinstance(force_schema, bool):
+        errors.append(
+            f"{ctx}.force_full_workflow_if_output_schema must be a boolean, "
+            f"got {force_schema!r}"
+        )
+
+    allow_escalation = raw.get("allow_escalation_to_full_workflow")
+    if allow_escalation is not None and not isinstance(allow_escalation, bool):
+        errors.append(
+            f"{ctx}.allow_escalation_to_full_workflow must be a boolean, "
+            f"got {allow_escalation!r}"
+        )
+
+    max_tokens = raw.get("direct_answer_max_tokens")
+    if max_tokens is not None and (
+        not isinstance(max_tokens, int) or max_tokens < 1
+    ):
+        errors.append(
+            f"{ctx}.direct_answer_max_tokens must be a positive integer, got {max_tokens!r}"
         )
 
 

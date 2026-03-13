@@ -1,0 +1,44 @@
+[
+  {
+    "index": 0,
+    "description": "Search for general information on web application penetration testing, including methodologies and importance.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Completed search for general information; no relevant findings."
+  },
+  {
+    "index": 1,
+    "description": "Compile a list of common tools used in web application penetration testing, noting whether they are open-source or commercial.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Completed search for common tools; no relevant findings."
+  },
+  {
+    "index": 2,
+    "description": "Research common penetration testing techniques, detailing how each is applied in web applications.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Completed search for common techniques; no relevant findings."
+  },
+  {
+    "index": 3,
+    "description": "Find case studies or examples that demonstrate the use of tools and techniques in real-world scenarios.",
+    "priority": "medium",
+    "completed": true,
+    "completion_summary": "Completed search for case studies; no relevant findings."
+  },
+  {
+    "index": 4,
+    "description": "Organize the findings into a structured report format.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 5,
+    "description": "Cite all sources used in the research for reference.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  }
+]

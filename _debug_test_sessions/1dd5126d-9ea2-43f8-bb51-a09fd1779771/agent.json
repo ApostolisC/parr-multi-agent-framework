@@ -1,0 +1,11 @@
+{
+  "task_id": "11cb88a3-1ea1-4c20-a67d-66d4c254217d",
+  "agent_id": "e28db2cc-4285-406a-adaa-57d7a5c4c4b7",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "What is a data protection impact assessment (DPIA)? How is it conducted?",
+  "status": "running",
+  "depth": 0,
+  "parent_task_id": null,
+  "model": "gpt-4o"
+}

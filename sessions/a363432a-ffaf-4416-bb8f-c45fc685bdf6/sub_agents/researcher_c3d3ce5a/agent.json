@@ -1,0 +1,11 @@
+{
+  "task_id": "c3d3ce5a-a7f5-4b9b-98ed-ae3d58653dee",
+  "agent_id": "e9c50e7d-04c5-4d17-b493-5299902cf644",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Investigate and list other methodologies related to data protection assessments, such as Privacy Impact Assessments (PIA) and Risk Assessments.",
+  "status": "running",
+  "depth": 1,
+  "parent_task_id": "3da59071-8322-4005-b06d-0c4b4b32ba82",
+  "model": "gpt-4o-mini"
+}

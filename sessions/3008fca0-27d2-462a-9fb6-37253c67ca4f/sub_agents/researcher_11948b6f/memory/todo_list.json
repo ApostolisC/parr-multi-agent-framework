@@ -1,0 +1,44 @@
+[
+  {
+    "index": 0,
+    "description": "Identify key phases of penetration testing methodology specific to WiFi networks (e.g., reconnaissance, scanning, exploitation, reporting).",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Gather detailed techniques and tools used in each phase of WiFi penetration testing.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Research common vulnerabilities and attack vectors specific to WiFi networks.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Compile best practices for conducting WiFi penetration tests, including legal and ethical considerations.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 4,
+    "description": "Find case studies or examples of WiFi penetration testing to illustrate methodology in practice.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 5,
+    "description": "Organize findings into a structured outline for the penetration testing methodology report.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  }
+]

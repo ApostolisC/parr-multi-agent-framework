@@ -1,0 +1,17 @@
+[
+  {
+    "criterion": "All search steps completed",
+    "rating": "pass",
+    "justification": "Searched and read multiple documents."
+  },
+  {
+    "criterion": "Findings logged with sources",
+    "rating": "pass",
+    "justification": "3 findings logged with citations."
+  },
+  {
+    "criterion": "Key risks identified",
+    "rating": "pass",
+    "justification": "Diagnostics, privacy, and bias risks covered."
+  }
+]

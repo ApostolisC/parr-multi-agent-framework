@@ -1,0 +1,30 @@
+[
+  {
+    "index": 0,
+    "description": "Conduct a broad search for case studies on WiFi penetration testing.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Identify and extract key findings from relevant documents or articles on WiFi penetration testing applications.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Summarize the findings into a structured report format, highlighting key case studies and their outcomes.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Cite all sources used in the research for transparency and verification.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  }
+]

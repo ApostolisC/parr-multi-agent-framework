@@ -1,0 +1,30 @@
+[
+  {
+    "index": 0,
+    "description": "Research and summarize what a Data Protection Impact Assessment (DPIA) is, including its purpose and key components.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Investigate other methodologies related to data protection assessments, such as Privacy Impact Assessments (PIA), Risk Assessments, and Security Assessments.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Research and summarize what a Data Protection Impact Assessment (DPIA) is, including its purpose and key components.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Investigate other methodologies related to data protection assessments, such as Privacy Impact Assessments (PIA), Risk Assessments, and Security Assessments.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  }
+]

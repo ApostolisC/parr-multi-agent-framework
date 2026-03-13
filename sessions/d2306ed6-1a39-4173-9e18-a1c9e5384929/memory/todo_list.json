@@ -1,0 +1,37 @@
+[
+  {
+    "index": 0,
+    "description": "Research general risks associated with security assessments.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Identify specific risks related to different types of security assessments (e.g., penetration testing, vulnerability assessments, etc.).",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Investigate potential legal and compliance risks during security assessments.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Explore risks related to data handling and privacy during security assessments.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 4,
+    "description": "Compile findings and organize them into a structured report.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  }
+]

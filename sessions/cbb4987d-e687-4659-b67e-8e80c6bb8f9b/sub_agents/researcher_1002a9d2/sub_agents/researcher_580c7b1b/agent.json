@@ -1,0 +1,11 @@
+{
+  "task_id": "580c7b1b-8f44-4a83-a8ab-f15ac0ef8384",
+  "agent_id": "8107aaea-daa6-4a64-83c7-855537410227",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Investigate the vulnerability scanning phase, focusing on common vulnerabilities, tools, and methodologies.",
+  "status": "failed",
+  "depth": 2,
+  "parent_task_id": "1002a9d2-7d98-4b35-a48c-977348d262da",
+  "model": "gpt-4o-mini"
+}

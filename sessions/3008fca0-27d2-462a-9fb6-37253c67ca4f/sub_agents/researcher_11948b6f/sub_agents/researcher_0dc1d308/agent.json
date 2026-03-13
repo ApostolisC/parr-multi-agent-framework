@@ -1,0 +1,11 @@
+{
+  "task_id": "0dc1d308-f4f7-4a5e-8cac-9dfc4e415ace",
+  "agent_id": "dfae4201-0585-4028-a492-92605079bf54",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Research common vulnerabilities and attack vectors specific to WiFi networks.",
+  "status": "completed",
+  "depth": 2,
+  "parent_task_id": "11948b6f-7a62-4bda-b7b2-978021f9e22d",
+  "model": "gpt-4o-mini"
+}

@@ -1,0 +1,11 @@
+{
+  "task_id": "1002a9d2-7d98-4b35-a48c-977348d262da",
+  "agent_id": "e323f1b1-c5f4-407d-8dde-6f53d41e4a0b",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Research and outline a pentest methodology for web applications, covering information gathering, vulnerability scanning, exploitation, and reporting.",
+  "status": "failed",
+  "depth": 1,
+  "parent_task_id": "3d4bf3d2-2451-4b4f-8785-73214f8209c4",
+  "model": "gpt-4o-mini"
+}

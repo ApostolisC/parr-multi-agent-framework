@@ -1,0 +1,11 @@
+{
+  "task_id": "12acdbc7-b5eb-40e0-a2d6-27cb6172e5e0",
+  "agent_id": "104cc497-ae07-4a33-a768-9c8a6ed6a818",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Research and summarize what a Data Protection Impact Assessment (DPIA) is, including its purpose and key components.",
+  "status": "running",
+  "depth": 1,
+  "parent_task_id": "a96187f4-e6f6-479a-8350-7cb943f6204c",
+  "model": "gpt-4o-mini"
+}

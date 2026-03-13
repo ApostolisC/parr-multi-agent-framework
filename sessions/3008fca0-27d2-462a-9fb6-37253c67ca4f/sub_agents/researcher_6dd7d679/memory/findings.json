@@ -1,0 +1,26 @@
+[
+  {
+    "category": "gap",
+    "content": "No findings were recorded regarding OWASP penetration testing methodology or NIST guidelines.",
+    "source": "Research execution",
+    "confidence": "high"
+  },
+  {
+    "category": "gap",
+    "content": "Significant gaps in research due to absence of findings on both methodologies.",
+    "source": "Research execution",
+    "confidence": "high"
+  },
+  {
+    "category": "gap",
+    "content": "Critical tool failure as searches conducted did not yield results.",
+    "source": "Research execution",
+    "confidence": "high"
+  },
+  {
+    "category": "quality",
+    "content": "Insufficient quality of output due to lack of findings for reporting.",
+    "source": "Research execution",
+    "confidence": "high"
+  }
+]

@@ -1,0 +1,30 @@
+[
+  {
+    "index": 0,
+    "description": "Research common vulnerabilities identified during the vulnerability scanning phase, including their definitions and examples.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Identify and summarize popular tools used for vulnerability scanning, including their features and use cases.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Investigate methodologies employed in vulnerability scanning, such as OWASP, NIST, and others, detailing their frameworks and processes.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Compile findings into a structured report format, including sections for common vulnerabilities, tools, and methodologies.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  }
+]

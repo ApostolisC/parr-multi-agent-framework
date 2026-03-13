@@ -1,0 +1,16 @@
+[
+  {
+    "index": 0,
+    "description": "Research and define what vulnerability assessment is, including its purpose and general process.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Researched and defined vulnerability assessment, including its purpose and general process. Findings recorded."
+  },
+  {
+    "index": 1,
+    "description": "Summarize the key components and importance of vulnerability assessment in two concise paragraphs.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Summarized the key components and importance of vulnerability assessment in two concise paragraphs, based on findings."
+  }
+]

@@ -1,0 +1,37 @@
+[
+  {
+    "index": 0,
+    "description": "Research the general penetration testing methodology specific to WiFi networks.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Identify and document the phases of WiFi penetration testing including planning, scanning, gaining access, maintaining access, and analysis/reporting.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Gather detailed evidence and data points on tools and techniques used in each phase of WiFi penetration testing.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Compile findings into a structured outline format for easy reference.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 4,
+    "description": "Review and verify the accuracy of the gathered information with credible sources.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  }
+]

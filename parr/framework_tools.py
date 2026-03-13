@@ -125,7 +125,7 @@ class AgentWorkingMemory:
         lines = []
         for item in self.todo_list:
             status = "[x]" if item.completed else "[ ]"
-            summary = f" — {item.completion_summary}" if item.completion_summary else ""
+            summary = f" - {item.completion_summary}" if item.completion_summary else ""
             lines.append(
                 f"{status} {item.index}. [{item.priority}] {item.description}{summary}"
             )
@@ -262,7 +262,6 @@ def build_plan_tools(memory: AgentWorkingMemory) -> List[ToolDef]:
             },
             handler=lambda items: memory.create_todo_list(items),
             phase_availability=[Phase.PLAN],
-            mandatory_in_phases=[Phase.PLAN],
             is_framework_tool=True,
         ),
         ToolDef(
@@ -485,6 +484,8 @@ def build_report_tools(
     memory: AgentWorkingMemory,
     report_template_handler: Optional[Callable] = None,
     output_schema: Optional[Dict[str, Any]] = None,
+    default_role: Optional[str] = None,
+    default_sub_role: Optional[str] = None,
 ) -> List[ToolDef]:
     """
     Build tools available in the Report phase.
@@ -498,6 +499,9 @@ def build_report_tools(
         output_schema: Optional JSON Schema for the report content. When
             provided, the ``submit_report`` tool's parameters will reflect
             this schema so the LLM knows the expected structure.
+        default_role: Agent role fallback used when the LLM passes
+            an unknown role identifier to get_report_template.
+        default_sub_role: Agent sub-role fallback paired with default_role.
     """
     # Build submit_report parameters — use output_schema if provided,
     # otherwise fall back to open-ended additionalProperties.
@@ -513,6 +517,39 @@ def build_report_tools(
                 "directly as top-level properties."
             ),
         }
+
+    def _resolve_report_template(role: str = "", sub_role: Optional[str] = None) -> str:
+        if not report_template_handler:
+            return (
+                "No report template configured. Use your best judgment to "
+                "structure the report based on your findings and the output schema."
+            )
+
+        requested_role = (role or "").strip() or (default_role or "")
+        requested_sub_role = (
+            sub_role
+            if (sub_role is not None and str(sub_role).strip())
+            else default_sub_role
+        )
+
+        template = report_template_handler(requested_role, requested_sub_role)
+        if template:
+            return template
+
+        # LLMs occasionally pass human-readable labels instead of role IDs.
+        # Fall back to the current agent role to avoid losing formatting guidance.
+        if default_role and (
+            requested_role != default_role or requested_sub_role != default_sub_role
+        ):
+            fallback = report_template_handler(default_role, default_sub_role)
+            if fallback:
+                return fallback
+
+        return (
+            "No specific report template is defined for this role. "
+            "Use your best judgment to structure the report based on your findings "
+            "and the output schema."
+        )
 
     tools = [
         ToolDef(
@@ -535,12 +572,7 @@ def build_report_tools(
                     },
                 },
             },
-            handler=lambda role="", sub_role=None: (
-                report_template_handler(role, sub_role)
-                if report_template_handler
-                else "No report template configured. Use your best judgment to "
-                     "structure the report based on your findings and the output schema."
-            ),
+            handler=_resolve_report_template,
             phase_availability=[Phase.REPORT],
             is_framework_tool=True,
         ),

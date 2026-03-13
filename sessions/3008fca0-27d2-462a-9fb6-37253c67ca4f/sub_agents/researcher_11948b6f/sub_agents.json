@@ -1,0 +1,42 @@
+[
+  {
+    "task_id": "8a729e5a-984b-4202-83d3-791b373a86cc",
+    "agent_id": "a89b9460-c79a-4cd3-b51c-77b440d9e63c",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Research and outline the key phases of penetration testing methodology specific to WiFi networks, including reconnaissance, scanning, exploitation, and reporting.",
+    "status": "completed"
+  },
+  {
+    "task_id": "2ece2764-826d-45ca-8177-7d140ca1e11d",
+    "agent_id": "c03d2eb2-7c5e-4b93-ab79-f11fa61fbf16",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Research and gather detailed techniques and tools used in each phase of WiFi penetration testing.",
+    "status": "completed"
+  },
+  {
+    "task_id": "0dc1d308-f4f7-4a5e-8cac-9dfc4e415ace",
+    "agent_id": "dfae4201-0585-4028-a492-92605079bf54",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Research common vulnerabilities and attack vectors specific to WiFi networks.",
+    "status": "completed"
+  },
+  {
+    "task_id": "528aa457-2afd-44d8-a5e6-54c15faf10eb",
+    "agent_id": "2d138ee6-bf21-4f51-b81f-4bae6a2f0a32",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Research best practices for conducting WiFi penetration tests, including legal and ethical considerations.",
+    "status": "failed"
+  },
+  {
+    "task_id": "bed94643-de1a-450c-9fb0-562e888574ad",
+    "agent_id": "425565d0-8770-4d9c-9d22-795f85d128ab",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Find case studies or examples of WiFi penetration testing to illustrate methodology in practice.",
+    "status": "failed"
+  }
+]

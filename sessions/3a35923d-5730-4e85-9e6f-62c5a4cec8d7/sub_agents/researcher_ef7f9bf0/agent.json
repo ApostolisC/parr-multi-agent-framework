@@ -1,0 +1,11 @@
+{
+  "task_id": "ef7f9bf0-9046-49fd-bcc0-b1c77020a662",
+  "agent_id": "96c08b0f-2f40-4925-8282-619bd4c6f3ce",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "Investigate common tools and techniques used in web application penetration testing.",
+  "status": "failed",
+  "depth": 1,
+  "parent_task_id": "494574f7-d5da-4198-b966-88bbd330c7b9",
+  "model": "gpt-4o-mini"
+}

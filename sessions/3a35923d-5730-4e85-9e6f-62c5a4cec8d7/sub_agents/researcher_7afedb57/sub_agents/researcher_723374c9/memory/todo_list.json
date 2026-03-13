@@ -1,0 +1,44 @@
+[
+  {
+    "index": 0,
+    "description": "Conduct a broad search on WiFi penetration testing techniques, focusing on packet sniffing, man-in-the-middle attacks, and other relevant methods.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Identify and summarize key documents and articles that discuss various WiFi penetration testing methods.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Extract detailed information on packet sniffing techniques used in WiFi penetration testing, including tools and processes.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Extract detailed information on man-in-the-middle attack techniques used in WiFi penetration testing, including tools and processes.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 4,
+    "description": "Research additional WiFi penetration testing techniques beyond packet sniffing and man-in-the-middle attacks, such as rogue access points and deauthentication attacks.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 5,
+    "description": "Compile findings into a structured report summarizing all techniques identified, their effectiveness, and tools used.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  }
+]

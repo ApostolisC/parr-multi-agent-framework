@@ -1,0 +1,14 @@
+{
+  "plan": {
+    "content": "Created analysis plan with 4 research areas.",
+    "iterations": 2,
+    "hit_iteration_limit": false,
+    "tool_calls_count": 1
+  },
+  "act": {
+    "content": null,
+    "iterations": 3,
+    "hit_iteration_limit": false,
+    "tool_calls_count": 2
+  }
+}

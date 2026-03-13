@@ -1,0 +1,11 @@
+{
+  "task_id": "6c24cf22-7f9a-4d8f-979c-cec7a4985fc6",
+  "agent_id": "6807950e-38fb-422e-b333-72dfc4eaf7dd",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "what are the phases of dpia?",
+  "status": "completed",
+  "depth": 0,
+  "parent_task_id": null,
+  "model": "gpt-4.1"
+}

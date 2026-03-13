@@ -1,0 +1,11 @@
+{
+  "task_id": "8a729e5a-984b-4202-83d3-791b373a86cc",
+  "agent_id": "a89b9460-c79a-4cd3-b51c-77b440d9e63c",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Research and outline the key phases of penetration testing methodology specific to WiFi networks, including reconnaissance, scanning, exploitation, and reporting.",
+  "status": "completed",
+  "depth": 2,
+  "parent_task_id": "11948b6f-7a62-4bda-b7b2-978021f9e22d",
+  "model": "gpt-4o-mini"
+}

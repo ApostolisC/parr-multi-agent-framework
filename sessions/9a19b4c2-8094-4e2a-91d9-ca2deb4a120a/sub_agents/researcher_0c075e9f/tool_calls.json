@@ -1,0 +1,29 @@
+[
+  {
+    "name": "create_todo_list",
+    "phase": "plan",
+    "arguments": {
+      "items": [
+        {
+          "description": "Research and define 'Data Protection Assessment' methodologies.",
+          "priority": "high"
+        },
+        {
+          "description": "Identify and summarize key features of various data protection assessment methodologies.",
+          "priority": "high"
+        },
+        {
+          "description": "Gather examples of organizations or frameworks that utilize these methodologies.",
+          "priority": "medium"
+        },
+        {
+          "description": "Compile findings into a structured report format.",
+          "priority": "medium"
+        }
+      ]
+    },
+    "result_content": "Created todo list with 4 items.",
+    "success": true,
+    "error": null
+  }
+]

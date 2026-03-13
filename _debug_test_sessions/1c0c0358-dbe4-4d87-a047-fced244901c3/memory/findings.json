@@ -1,0 +1,20 @@
+[
+  {
+    "category": "diagnostics",
+    "content": "Deep learning models show 94% sensitivity for lung nodule detection.",
+    "source": "WHO Report 2025, Chapter 3",
+    "confidence": "high"
+  },
+  {
+    "category": "privacy",
+    "content": "AI systems face re-identification risks and model memorization.",
+    "source": "EU Health Data Space Whitepaper 2025",
+    "confidence": "high"
+  },
+  {
+    "category": "bias",
+    "content": "Dermatology AI models perform worse on darker skin tones.",
+    "source": "Lancet Digital Health, 2025",
+    "confidence": "high"
+  }
+]

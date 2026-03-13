@@ -1,0 +1,10 @@
+[
+  {
+    "task_id": "8bec9e48-4076-4fb5-958a-5cdc9b234c88",
+    "agent_id": "0aed61e5-906f-427b-8284-f79804bfbc00",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Conduct a thorough investigation into the penetration testing methodology for WiFi networks, focusing on the phases involved, tools, and techniques used.",
+    "status": "failed"
+  }
+]

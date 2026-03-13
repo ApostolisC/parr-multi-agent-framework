@@ -1,0 +1,20 @@
+[
+  {
+    "category": "data_point",
+    "content": "A Data Protection Impact Assessment (DPIA) is a process designed to help organizations identify and minimize the data protection risks of a project. It is particularly relevant when processing personal data that may pose a high risk to the rights and freedoms of individuals.",
+    "source": "ICO UK - Data Protection Impact Assessments",
+    "confidence": "high"
+  },
+  {
+    "category": "data_point",
+    "content": "DPIAs are mandated under the General Data Protection Regulation (GDPR) for processing that is likely to result in a high risk to the rights and freedoms of individuals. Article 35 of the GDPR outlines the requirements for conducting a DPIA.",
+    "source": "GDPR - Article 35",
+    "confidence": "high"
+  },
+  {
+    "category": "data_point",
+    "content": "The significance of DPIAs lies in their ability to provide a structured approach to identifying risks and ensuring compliance with data protection laws, ultimately protecting individuals' privacy rights.",
+    "source": "European Data Protection Board (EDPB) Guidelines",
+    "confidence": "high"
+  }
+]

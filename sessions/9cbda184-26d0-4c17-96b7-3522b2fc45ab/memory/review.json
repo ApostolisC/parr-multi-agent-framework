@@ -1,0 +1,22 @@
+[
+  {
+    "criterion": "Does the collected data/analysis address the original task fully?",
+    "rating": "partial",
+    "justification": "The findings acknowledge a gap in the document corpus and do not provide the standard phases of a DPIA directly from authoritative sources. The summary in the execution summary provides the phases based on general knowledge and external authoritative guidance, but the findings themselves do not demonstrate extraction or citation from the corpus."
+  },
+  {
+    "criterion": "Are there gaps, contradictions, or areas where quality is insufficient?",
+    "rating": "partial",
+    "justification": "There is a critical gap: the phases of a DPIA were not found or cited from the available document corpus. The answer relies on general knowledge and external sources, not on extracted evidence from the provided documents."
+  },
+  {
+    "criterion": "Were any tools or sub-agents that failed critical to the task?",
+    "rating": "pass",
+    "justification": "No tools or sub-agents failed. The gap is due to the lack of relevant content in the document corpus, not tool failure."
+  },
+  {
+    "criterion": "Is the quality of findings sufficient for reporting?",
+    "rating": "partial",
+    "justification": "The findings accurately report the gap in the corpus, but do not provide the requested DPIA phases with in-corpus citations. The summary fills the gap with external knowledge, but this is not reflected in the findings themselves."
+  }
+]

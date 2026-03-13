@@ -1,0 +1,11 @@
+{
+  "task_id": "48759a45-37dc-47dd-a47d-5a257d56661e",
+  "agent_id": "18bdbfe6-9123-4a38-a1c8-636e5a828df8",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "what is dpia",
+  "status": "running",
+  "depth": 0,
+  "parent_task_id": null,
+  "model": "gpt-4o-mini"
+}

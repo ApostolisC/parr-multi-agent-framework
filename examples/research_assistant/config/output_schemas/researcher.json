@@ -1,9 +1,13 @@
 {
   "type": "object",
   "properties": {
+    "answer": {
+      "type": "string",
+      "description": "Direct answer to the user's question. Can include numbered phases or concise bullets."
+    },
     "summary": {
       "type": "string",
-      "description": "2-3 sentence overview of research findings."
+      "description": "Overview of findings. Keep it concise but do not remove essential details from execution."
     },
     "key_findings": {
       "type": "array",
@@ -11,9 +15,51 @@
         "type": "object",
         "properties": {
           "finding": { "type": "string" },
-          "source": { "type": "string" }
+          "source": { "type": "string" },
+          "evidence": { "type": "string" },
+          "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"]
+          }
         },
-        "required": ["finding", "source"]
+        "required": ["finding"]
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "description": "Supporting details, quotes, data points, or extracted snippets.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "detail": { "type": "string" },
+          "source": { "type": "string" },
+          "url": { "type": "string" },
+          "quote": { "type": "string" },
+          "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"]
+          }
+        },
+        "required": ["detail"]
+      }
+    },
+    "sources": {
+      "type": "array",
+      "description": "Canonical source list used in the answer.",
+      "items": {
+        "oneOf": [
+          { "type": "string" },
+          {
+            "type": "object",
+            "properties": {
+              "title": { "type": "string" },
+              "source": { "type": "string" },
+              "url": { "type": "string" },
+              "publisher": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        ]
       }
     },
     "gaps": {
@@ -23,7 +69,14 @@
     "recommendations": {
       "type": "array",
       "items": { "type": "string" }
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Overall confidence in the deliverable."
     }
   },
-  "required": ["summary", "key_findings"]
+  "required": ["summary"],
+  "additionalProperties": true
 }

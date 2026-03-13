@@ -1,0 +1,11 @@
+{
+  "task_id": "779e6ddc-afdc-4b11-8260-438c6db9f940",
+  "agent_id": "f4ea4f7d-bb03-4cde-b5b3-ac3434a686b1",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Explore the exploitation phase in WiFi pentesting, detailing common attacks and exploitation techniques.",
+  "status": "failed",
+  "depth": 2,
+  "parent_task_id": "d6d66704-b2ee-49a4-a63c-c5f2b3a293cb",
+  "model": "gpt-4o-mini"
+}

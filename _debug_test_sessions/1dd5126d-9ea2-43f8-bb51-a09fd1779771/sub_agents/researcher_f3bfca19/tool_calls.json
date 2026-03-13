@@ -1,0 +1,15 @@
+[
+  {
+    "name": "create_todo_list",
+    "phase": "plan",
+    "arguments": {
+      "items": [
+        {
+          "description": "Analyze Art 35"
+        }
+      ]
+    },
+    "result": "Created 1 todo item.",
+    "success": true
+  }
+]

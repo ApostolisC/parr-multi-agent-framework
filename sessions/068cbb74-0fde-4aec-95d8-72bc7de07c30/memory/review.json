@@ -1,0 +1,22 @@
+[
+  {
+    "criterion": "Does the collected data/analysis address the original task fully?",
+    "rating": "pass",
+    "justification": "The findings provide a clear definition, purpose, general process, key components, and importance of vulnerability assessment, fully addressing the request for a two-paragraph explanation."
+  },
+  {
+    "criterion": "Are there gaps, contradictions, or areas where quality is insufficient?",
+    "rating": "pass",
+    "justification": "There are no notable gaps or contradictions. The information is concise, relevant, and covers all required aspects of the topic."
+  },
+  {
+    "criterion": "Were any tools or sub-agents that failed critical to the task?",
+    "rating": "pass",
+    "justification": "No tools or sub-agents failed. All necessary research and summarization steps were completed successfully."
+  },
+  {
+    "criterion": "Is the quality of findings sufficient for reporting?",
+    "rating": "pass",
+    "justification": "The findings are well-sourced (from general cybersecurity literature), clearly written, and sufficient for reporting in a concise two-paragraph format."
+  }
+]

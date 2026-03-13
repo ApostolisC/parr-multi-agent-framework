@@ -1,0 +1,22 @@
+[
+  {
+    "criterion": "Does the collected data/analysis address the original task fully?",
+    "rating": "fail",
+    "justification": "The analysis does not address the original task as there are no findings regarding OWASP or NIST methodologies, leading to significant gaps."
+  },
+  {
+    "criterion": "Are there gaps, contradictions, or areas where quality is insufficient?",
+    "rating": "fail",
+    "justification": "There are critical gaps in the research, particularly the absence of findings on both methodologies, resulting in insufficient quality of output."
+  },
+  {
+    "criterion": "Were any tools or sub-agents that failed critical to the task?",
+    "rating": "pass",
+    "justification": "The tool failure was critical as it directly impacted the ability to gather necessary findings."
+  },
+  {
+    "criterion": "Is the quality of findings sufficient for reporting?",
+    "rating": "fail",
+    "justification": "The quality of findings is insufficient as there are no relevant findings to report on the methodologies."
+  }
+]

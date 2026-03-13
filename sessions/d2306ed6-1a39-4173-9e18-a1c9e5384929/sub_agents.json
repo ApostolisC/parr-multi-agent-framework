@@ -1,0 +1,18 @@
+[
+  {
+    "task_id": "20fe6eeb-e61c-4346-a5c4-e9ae7922555c",
+    "agent_id": "a6c798f8-9eaa-4fe7-97bc-818a33e81b33",
+    "role": "researcher",
+    "sub_role": null,
+    "task_description": "Research general risks associated with security assessments.",
+    "status": "spawned"
+  },
+  {
+    "task_id": "9a0918f5-d071-49d5-af98-7f09f6831b5b",
+    "agent_id": "1c7fa30e-c396-4bf3-89bb-1bbc02e137f2",
+    "role": "researcher",
+    "sub_role": null,
+    "task_description": "Identify specific risks related to different types of security assessments (e.g., penetration testing, vulnerability assessments, etc.).",
+    "status": "spawned"
+  }
+]

@@ -1,0 +1,11 @@
+{
+  "task_id": "61d1767e-e5b1-4a9c-9852-5b0e664a0c59",
+  "agent_id": "e843d709-6568-489f-87f1-8f2880aa1035",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "Research the concept of Data Protection Impact Assessment (DPIA) and its significance in data protection law.",
+  "status": "running",
+  "depth": 1,
+  "parent_task_id": "8de8ca0d-4b36-4486-b270-b6c588c345d3",
+  "model": "gpt-4o-mini"
+}

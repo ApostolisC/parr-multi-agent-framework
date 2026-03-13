@@ -1,0 +1,30 @@
+[
+  {
+    "index": 0,
+    "description": "Research common attacks in the exploitation phase of WiFi pentesting, focusing on techniques such as packet sniffing, deauthentication attacks, and evil twin attacks.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Gather detailed evidence and data points on each identified attack technique, including methods, tools used, and potential impacts.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Compile findings into a structured format, categorizing attacks and techniques for clarity.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Cite all sources used in the research to ensure credibility and allow for further reading.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  }
+]

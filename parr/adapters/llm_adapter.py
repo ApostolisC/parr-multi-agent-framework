@@ -35,6 +35,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ..budget_tracker import BudgetExceededException
 from ..core_types import (
     CostConfig,
+    LLMRateLimitConfig,
     LLMResponse,
     Message,
     MessageRole,
@@ -42,6 +43,7 @@ from ..core_types import (
     TokenUsage,
     ToolCall,
 )
+from .llm_rate_limiter import RateLimitedToolCallingLLM
 
 logger = logging.getLogger(__name__)
 
@@ -882,6 +884,7 @@ def create_tool_calling_llm(
     provider_type: str,
     model: str,
     cost_config: Optional[CostConfig] = None,
+    llm_rate_limit: Optional[LLMRateLimitConfig] = None,
     **kwargs: Any,
 ) -> Any:
     """
@@ -893,6 +896,7 @@ def create_tool_calling_llm(
         provider_type: One of "openai", "azure_openai", "anthropic".
         model: Model name or deployment name.
         cost_config: Optional pricing config.
+        llm_rate_limit: Optional global queue/rate-limit settings.
         **kwargs: Provider-specific arguments:
             - openai: api_key, timeout
             - azure_openai: endpoint, api_key, api_version, timeout
@@ -901,6 +905,7 @@ def create_tool_calling_llm(
     Returns:
         A ToolCallingLLM-compatible adapter instance.
     """
+    llm: Any
     if provider_type in ("openai", "azure_openai"):
         if provider_type == "azure_openai":
             from openai import AsyncAzureOpenAI
@@ -919,7 +924,7 @@ def create_tool_calling_llm(
                 timeout=kwargs.get("timeout", 120.0),
             )
 
-        return OpenAIToolCallingLLM(
+        llm = OpenAIToolCallingLLM(
             client=client,
             model=model,
             cost_config=cost_config,
@@ -933,7 +938,7 @@ def create_tool_calling_llm(
             timeout=kwargs.get("timeout", 120.0),
         )
 
-        return AnthropicToolCallingLLM(
+        llm = AnthropicToolCallingLLM(
             client=client,
             model=model,
             cost_config=cost_config,
@@ -944,3 +949,8 @@ def create_tool_calling_llm(
             f"Unsupported provider_type: {provider_type}. "
             f"Supported: 'openai', 'azure_openai', 'anthropic'"
         )
+
+    if llm_rate_limit and llm_rate_limit.enabled:
+        llm = RateLimitedToolCallingLLM(llm=llm, config=llm_rate_limit)
+
+    return llm

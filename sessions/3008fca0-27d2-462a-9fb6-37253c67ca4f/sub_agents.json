@@ -1,0 +1,18 @@
+[
+  {
+    "task_id": "11948b6f-7a62-4bda-b7b2-978021f9e22d",
+    "agent_id": "78545888-c351-40ab-8039-0e9b47311eed",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Research and outline a penetration testing methodology for WiFi networks.",
+    "status": "failed"
+  },
+  {
+    "task_id": "6dd7d679-b491-49ae-83ed-c8e94051334e",
+    "agent_id": "e5f3328d-ec02-42d9-833f-e49b87e8c5ec",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Research and outline a penetration testing methodology for web applications.",
+    "status": "failed"
+  }
+]

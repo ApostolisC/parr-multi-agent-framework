@@ -1,0 +1,11 @@
+{
+  "task_id": "15cd5b50-0321-44df-82f7-6c2c1bfcfe19",
+  "agent_id": "69b38214-a134-449a-a386-a4410d2778a6",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "Conduct broad research on WiFi penetration testing, gathering general information, tools, and techniques used in the field.",
+  "status": "failed",
+  "depth": 2,
+  "parent_task_id": "7afedb57-08a2-4b20-ab16-e63cb9f9fb8c",
+  "model": "gpt-4o-mini"
+}

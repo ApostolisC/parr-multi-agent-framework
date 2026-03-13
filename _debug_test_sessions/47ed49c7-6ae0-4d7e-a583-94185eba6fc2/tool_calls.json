@@ -1,0 +1,40 @@
+[
+  {
+    "name": "create_todo_list",
+    "phase": "plan",
+    "arguments": {
+      "items": [
+        {
+          "description": "Research market share data"
+        },
+        {
+          "description": "Analyze technology trends"
+        },
+        {
+          "description": "Review regulatory impact"
+        }
+      ]
+    },
+    "result": "Created 3 todo items.",
+    "success": true
+  },
+  {
+    "name": "search_documents",
+    "phase": "act",
+    "arguments": {
+      "query": "electric vehicle market share Europe 2025"
+    },
+    "result_content": "{\"results\": [{\"title\": \"EV Market Report Q1 2025\"}]}",
+    "success": true
+  },
+  {
+    "name": "read_section",
+    "phase": "act",
+    "arguments": {
+      "section_id": "ev1:0"
+    },
+    "result_content": null,
+    "success": false,
+    "error": "Section 'ev1:0' not found in corpus."
+  }
+]

@@ -1,0 +1,11 @@
+{
+  "task_id": "0b7cfc5d-d70e-498e-bbea-3d260c0123e1",
+  "agent_id": "a5d284b6-e158-4560-a95d-72a956cfb7b3",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Research the definition and purpose of a Data Protection Impact Assessment (DPIA), including its significance in data protection and compliance with regulations like GDPR.",
+  "status": "running",
+  "depth": 1,
+  "parent_task_id": "7281365e-1b2e-4ceb-bcaa-fd5badf04804",
+  "model": "gpt-4o-mini"
+}

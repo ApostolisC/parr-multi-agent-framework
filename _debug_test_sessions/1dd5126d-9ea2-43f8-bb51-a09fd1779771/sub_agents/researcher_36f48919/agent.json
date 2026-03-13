@@ -1,0 +1,11 @@
+{
+  "task_id": "36f48919-f082-49c8-b34a-ba7648c0ce7e",
+  "agent_id": "4db3aaeb-f837-4211-bb2d-fb8cbdca3046",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Deep dive into alternative DPIA methodologies (NIST, ISO 29134)",
+  "status": "running",
+  "depth": 1,
+  "parent_task_id": "11cb88a3-1ea1-4c20-a67d-66d4c254217d",
+  "model": "gpt-4o-mini"
+}

@@ -1,0 +1,34 @@
+[
+  {
+    "task_id": "fff2c6f4-5910-47e6-995b-bfafc9e12b87",
+    "agent_id": "0cceebb4-8a43-4dae-8271-1a62bca6f113",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Research the reconnaissance phase in WiFi pentesting, including tools and techniques used.",
+    "status": "failed"
+  },
+  {
+    "task_id": "fa2c00ed-9d55-4d79-8412-97cdb640d561",
+    "agent_id": "2bd1826a-0db9-423f-aebb-374adcb32cdf",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Investigate the scanning phase for WiFi networks, focusing on tools and methods for identifying vulnerabilities.",
+    "status": "failed"
+  },
+  {
+    "task_id": "779e6ddc-afdc-4b11-8260-438c6db9f940",
+    "agent_id": "f4ea4f7d-bb03-4cde-b5b3-ac3434a686b1",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Explore the exploitation phase in WiFi pentesting, detailing common attacks and exploitation techniques.",
+    "status": "failed"
+  },
+  {
+    "task_id": "e2b2edcc-b022-4aca-b371-bff93f24c337",
+    "agent_id": "9999f3a1-ab87-4999-ac8a-b2871da321be",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Examine the reporting phase, outlining how to document findings and create a comprehensive report.",
+    "status": "failed"
+  }
+]

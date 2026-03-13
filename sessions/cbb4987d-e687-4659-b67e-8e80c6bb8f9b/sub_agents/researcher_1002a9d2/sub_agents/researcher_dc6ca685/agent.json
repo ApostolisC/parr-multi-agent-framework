@@ -1,0 +1,11 @@
+{
+  "task_id": "dc6ca685-f3d9-4f8f-a949-5a036e27d5cd",
+  "agent_id": "542d9db0-f6be-468f-8fb1-0a4fc20276f3",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Research and gather detailed information on the information gathering phase of web application pentesting, including techniques and tools used.",
+  "status": "failed",
+  "depth": 2,
+  "parent_task_id": "1002a9d2-7d98-4b35-a48c-977348d262da",
+  "model": "gpt-4o-mini"
+}

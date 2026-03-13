@@ -1,0 +1,23 @@
+[
+  {
+    "index": 0,
+    "description": "Research market share data",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Analyze technology trends",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Review regulatory impact",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  }
+]

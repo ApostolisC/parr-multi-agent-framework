@@ -1,0 +1,37 @@
+[
+  {
+    "index": 0,
+    "description": "Research common web application vulnerabilities (e.g., SQL Injection, XSS, CSRF) and their exploitation techniques.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Identify and analyze specific tools used for exploiting web application vulnerabilities (e.g., Burp Suite, OWASP ZAP).",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Gather case studies or examples of successful exploitation of web application vulnerabilities.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Compile a list of best practices for mitigating web application vulnerabilities post-exploitation.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 4,
+    "description": "Synthesize findings into a structured report detailing exploitation techniques and examples.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  }
+]

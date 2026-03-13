@@ -1,0 +1,34 @@
+[
+  {
+    "task_id": "21d51b48-07e1-4793-a6f3-fbeca91a9061",
+    "agent_id": "8fe75a80-eb9e-4396-8cb1-eb0c487b7efb",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Research and outline the penetration testing methodology for WiFi networks.",
+    "status": "failed"
+  },
+  {
+    "task_id": "bf14044f-6909-4fac-9ca2-20a8b3b8cf11",
+    "agent_id": "113f946e-3a38-4bb2-bb78-6e90bff9222b",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Research and outline the penetration testing methodology for web applications.",
+    "status": "failed"
+  },
+  {
+    "task_id": "7afedb57-08a2-4b20-ab16-e63cb9f9fb8c",
+    "agent_id": "f8f8d864-ae98-477f-9fe9-85817b7e9856",
+    "role": "researcher",
+    "sub_role": null,
+    "task_description": "Investigate common tools and techniques used in WiFi penetration testing.",
+    "status": "failed"
+  },
+  {
+    "task_id": "ef7f9bf0-9046-49fd-bcc0-b1c77020a662",
+    "agent_id": "96c08b0f-2f40-4925-8282-619bd4c6f3ce",
+    "role": "researcher",
+    "sub_role": null,
+    "task_description": "Investigate common tools and techniques used in web application penetration testing.",
+    "status": "failed"
+  }
+]

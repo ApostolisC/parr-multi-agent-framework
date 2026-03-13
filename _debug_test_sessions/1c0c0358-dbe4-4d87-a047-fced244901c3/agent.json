@@ -1,0 +1,11 @@
+{
+  "task_id": "99888c8c-0794-4807-a4e6-d9895abc287c",
+  "agent_id": "110c44af-8e78-43c4-846a-f7f5c9349860",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "Research the current state of AI in healthcare. Focus on diagnostic capabilities, privacy risks, and regulatory requirements.",
+  "status": "completed",
+  "depth": 0,
+  "parent_task_id": null,
+  "model": "gpt-4o"
+}

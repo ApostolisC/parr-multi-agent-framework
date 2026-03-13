@@ -1,0 +1,93 @@
+[
+  {
+    "index": 0,
+    "description": "Define the report structure and format.",
+    "priority": "medium",
+    "completed": true,
+    "completion_summary": "Defined the report structure and format, outlining sections to include."
+  },
+  {
+    "index": 1,
+    "description": "Gather all findings and organize them by themes.",
+    "priority": "medium",
+    "completed": true,
+    "completion_summary": "Gathered all findings and organized them by themes."
+  },
+  {
+    "index": 2,
+    "description": "Draft the Introduction section.",
+    "priority": "medium",
+    "completed": true,
+    "completion_summary": "Drafted the Introduction section."
+  },
+  {
+    "index": 3,
+    "description": "Draft the Methodology section.",
+    "priority": "medium",
+    "completed": true,
+    "completion_summary": "Drafted the Methodology section."
+  },
+  {
+    "index": 4,
+    "description": "Draft the Findings section, including visuals.",
+    "priority": "medium",
+    "completed": true,
+    "completion_summary": "Drafted the Findings section, including visuals."
+  },
+  {
+    "index": 5,
+    "description": "Draft the Discussion section.",
+    "priority": "medium",
+    "completed": true,
+    "completion_summary": "Drafted the Discussion section."
+  },
+  {
+    "index": 6,
+    "description": "Draft the Conclusion section.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 7,
+    "description": "Draft the References section.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 8,
+    "description": "Review the draft for clarity and coherence.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 9,
+    "description": "Revise sections based on the review.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 10,
+    "description": "Finalize the report formatting.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 11,
+    "description": "Create an Executive Summary.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 12,
+    "description": "Prepare a presentation based on the report.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  }
+]

@@ -1,0 +1,11 @@
+{
+  "task_id": "606beff0-be89-4e10-b59f-af5e5c0356cc",
+  "agent_id": "96b5b3a9-2651-47f6-8b2e-a599f0d4279b",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "what are the risks during a security assessment?",
+  "status": "running",
+  "depth": 0,
+  "parent_task_id": null,
+  "model": "gpt-4o-mini"
+}

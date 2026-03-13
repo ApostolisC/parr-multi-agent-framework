@@ -218,6 +218,7 @@ class BudgetConfig:
     max_sub_agents_total: int = 3  # Max total children a single agent can spawn
     inherit_remaining: bool = True
     child_budget_fraction: float = 0.5  # Fraction of remaining budget for children
+    parent_recovery_budget_pct: float = 0.10  # Fraction of budget reserved for parent recovery after sub-agents
     max_child_review_cycles: Optional[int] = None  # None = use parent's max_review_cycles
     context_soft_compaction_pct: float = 0.40  # Fraction of context for soft compaction
     context_hard_truncation_pct: float = 0.65  # Fraction of context for hard truncation
@@ -290,6 +291,28 @@ class StallDetectionConfig:
     duplicate_call_window: int = 8
 
 
+@dataclass(frozen=True)
+class LLMRateLimitConfig:
+    """Global scheduling and throttling controls for LLM calls."""
+    enabled: bool = False
+    max_concurrent_requests: Optional[int] = None
+    max_requests_per_window: Optional[int] = None
+    max_tokens_per_window: Optional[int] = None
+    window_seconds: float = 60.0
+    max_queue_size: Optional[int] = None
+    acquire_timeout_seconds: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class SimpleQueryBypassConfig:
+    """Runtime policy for bypassing full phases on simple questions."""
+    enabled: bool = True
+    route_confidence_threshold: float = 0.80
+    force_full_workflow_if_output_schema: bool = True
+    allow_escalation_to_full_workflow: bool = True
+    direct_answer_max_tokens: int = 512
+
+
 # ---------------------------------------------------------------------------
 # Agent configuration (what defines an agent)
 # ---------------------------------------------------------------------------
@@ -354,6 +377,8 @@ class ExecutionMetadata:
     tools_called: List[Dict[str, Any]] = field(default_factory=list)
     total_duration_ms: float = 0.0
     phase_outputs: Dict[str, str] = field(default_factory=dict)  # phase_name -> LLM text
+    execution_path: str = "full_workflow"  # "full_workflow" | "direct_answer"
+    routing_decision: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -405,6 +430,8 @@ class AgentOutput:
                 "tools_called": self.execution_metadata.tools_called,
                 "total_duration_ms": self.execution_metadata.total_duration_ms,
                 "phase_outputs": self.execution_metadata.phase_outputs,
+                "execution_path": self.execution_metadata.execution_path,
+                "routing_decision": self.execution_metadata.routing_decision,
             },
         }
 

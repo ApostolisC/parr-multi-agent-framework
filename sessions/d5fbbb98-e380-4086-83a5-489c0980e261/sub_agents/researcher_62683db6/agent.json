@@ -1,0 +1,11 @@
+{
+  "task_id": "62683db6-1913-44af-8dd5-2363abc7a781",
+  "agent_id": "12b676e7-39bf-4a0a-8220-5743e2a1523d",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "Research the concept of Data Protection Impact Assessment (DPIA) to understand its definition, purpose, and importance in data protection regulations. Identify the key components and steps involved in conducting a DPIA, and gather examples of when a DPIA is required and its implications for organizations.",
+  "status": "failed",
+  "depth": 1,
+  "parent_task_id": "d66e9266-9f2a-4645-aafd-c529187a7d1f",
+  "model": "gpt-4o-mini"
+}

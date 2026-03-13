@@ -1,0 +1,11 @@
+{
+  "task_id": "a9f80580-f053-4169-8854-1d474300a51f",
+  "agent_id": "236a251d-9523-428f-b76c-e268f72459e3",
+  "role": "analyst",
+  "sub_role": null,
+  "task": "Analyze the competitive landscape for electric vehicle manufacturers in Europe, focusing on market share, technology adoption, and regulatory impact.",
+  "status": "running",
+  "depth": 0,
+  "parent_task_id": null,
+  "model": "claude-3-5-sonnet"
+}

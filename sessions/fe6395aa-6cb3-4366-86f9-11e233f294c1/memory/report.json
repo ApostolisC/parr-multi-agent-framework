@@ -1,0 +1,35 @@
+{
+  "summary": "The phases of a Data Protection Impact Assessment (DPIA) are clearly outlined by both the ICO and EDPB, with authoritative sources cited. Both sets of guidance provide structured steps for conducting a DPIA, including initial screening, risk assessment, stakeholder consultation, mitigation, documentation, and periodic review. There are no gaps or contradictions in the findings, and context for each phase is provided.",
+  "key_findings": [
+    {
+      "finding": "The ICO Guide to UK GDPR DPIA outlines the following phases of a DPIA: (1) identify whether a DPIA is needed, (2) describe the processing and data flows, (3) consult stakeholders, (4) assess necessity and proportionality, (5) identify privacy risks, (6) define mitigating controls, (7) document decisions and sign-off, and (8) review outcomes after implementation.",
+      "source": "ICO Guide to UK GDPR DPIA"
+    },
+    {
+      "finding": "The EDPB Guidelines on DPIA describe these phases: preliminary screening, processing description and purpose analysis, risk assessment for data subjects, selection of safeguards, decision on residual risk and consultation where required, and periodic review.",
+      "source": "EDPB Guidelines on DPIA"
+    },
+    {
+      "finding": "ICO Guide to UK GDPR DPIA phases: 1) Identify if a DPIA is needed, 2) Describe processing/data flows, 3) Consult stakeholders, 4) Assess necessity and proportionality, 5) Identify privacy risks, 6) Define mitigating controls, 7) Document decisions and sign-off, 8) Review outcomes after implementation.",
+      "source": "ICO Guide to UK GDPR DPIA"
+    },
+    {
+      "finding": "EDPB Guidelines on DPIA phases: 1) Preliminary screening, 2) Processing description and purpose analysis, 3) Risk assessment for data subjects, 4) Selection of safeguards, 5) Decision on residual risk and consultation where required, 6) Periodic review.",
+      "source": "EDPB Guidelines on DPIA"
+    },
+    {
+      "finding": "The ICO's DPIA phases begin with determining if a DPIA is required, then describing the planned data processing and flows. Stakeholders are consulted to gather input. The necessity and proportionality of the processing are assessed to ensure compliance. Privacy risks are identified, and controls to mitigate these risks are defined. All decisions are documented and signed off, and the outcomes are reviewed after implementation.",
+      "source": "ICO Guide to UK GDPR DPIA"
+    },
+    {
+      "finding": "The EDPB's DPIA phases start with a preliminary screening to check if a DPIA is needed. The next steps involve describing the processing and its purposes, assessing risks to data subjects, and selecting safeguards. A decision is made on the residual risk, and consultation is performed as required. The DPIA is periodically reviewed to ensure ongoing compliance.",
+      "source": "EDPB Guidelines on DPIA"
+    }
+  ],
+  "gaps": [],
+  "recommendations": [
+    "Organizations should follow the structured phases outlined by the ICO or EDPB when conducting a DPIA to ensure compliance and thorough risk assessment.",
+    "Periodic review and stakeholder consultation are critical for maintaining ongoing data protection and accountability.",
+    "Documentation and sign-off of decisions are essential for transparency and auditability."
+  ]
+}

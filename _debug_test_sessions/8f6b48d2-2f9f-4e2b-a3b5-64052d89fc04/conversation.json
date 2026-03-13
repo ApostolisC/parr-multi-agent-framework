@@ -1,0 +1,8 @@
+{
+  "plan": {
+    "content": "Planning research on quantum computing.",
+    "iterations": 5,
+    "hit_iteration_limit": true,
+    "tool_calls_count": 0
+  }
+}

@@ -1,0 +1,30 @@
+[
+  {
+    "index": 0,
+    "description": "Research and compile a list of commonly used WiFi penetration testing tools, including Aircrack-ng and Kismet.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Identify the key features and functionalities of each tool on the list.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Gather sources and references for each tool's information to ensure credibility.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Organize the findings into a structured report format.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  }
+]

@@ -1,0 +1,37 @@
+[
+  {
+    "index": 0,
+    "description": "Research the definition of a Data Protection Impact Assessment (DPIA).",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Identify the purpose of a DPIA in data protection and privacy law.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "List the key components of a DPIA.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Find examples or case studies of DPIAs in practice.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 4,
+    "description": "Summarize findings into a coherent analysis.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  }
+]

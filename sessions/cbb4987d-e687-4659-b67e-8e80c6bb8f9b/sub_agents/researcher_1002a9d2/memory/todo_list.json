@@ -1,0 +1,37 @@
+[
+  {
+    "index": 0,
+    "description": "Research and gather detailed information on the information gathering phase of web application pentesting, including techniques and tools used.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Investigate the vulnerability scanning phase, focusing on common vulnerabilities, tools, and methodologies.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Explore the exploitation phase, detailing techniques for exploiting vulnerabilities found in web applications.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Compile information on the reporting phase, including best practices for documenting findings and recommendations for remediation.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 4,
+    "description": "Synthesize findings from all phases into a cohesive outline of a pentest methodology for web applications.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  }
+]

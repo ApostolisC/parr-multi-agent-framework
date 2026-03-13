@@ -1,10 +1,10 @@
 # Model pricing for the research assistant example.
 
 models:
-  gpt-4o:
-    input_price_per_1k: 0.005
-    output_price_per_1k: 0.015
-    context_window: 128000
+  gpt-4.1:
+    input_price_per_1k: 0.002
+    output_price_per_1k: 0.008
+    context_window: 1000000
 
   gpt-4o-mini:
     input_price_per_1k: 0.00015

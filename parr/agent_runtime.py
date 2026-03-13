@@ -1,8 +1,10 @@
 """
 Agent Runtime for the Agentic Framework.
 
-Runs the full 4-phase lifecycle for a single agent:
-    Plan → Act → Review → Report
+Runs either:
+    1) Direct-answer bypass for simple queries, or
+    2) The full 4-phase lifecycle:
+       Plan → Act → Review → Report
 
 Each phase is delegated to the PhaseRunner. The runtime manages
 phase transitions, context passing between phases, review retry loops,
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -54,7 +57,11 @@ from .core_types import (
     ErrorEntry,
     ErrorSource,
     ExecutionMetadata,
+    Message,
+    MessageRole,
+    ModelConfig,
     Phase,
+    SimpleQueryBypassConfig,
     StallDetectionConfig,
     ToolCall,
     ToolDef,
@@ -70,11 +77,13 @@ logger = logging.getLogger(__name__)
 # Review pass/fail detection
 REVIEW_PASSED_MARKER = "REVIEW_PASSED"
 REVIEW_FAILED_MARKER = "REVIEW_FAILED"
+EXECUTION_PATH_DIRECT = "direct_answer"
+EXECUTION_PATH_FULL = "full_workflow"
 
 
 class AgentRuntime:
     """
-    Executes a single agent through its full phase lifecycle.
+    Executes a single agent through direct-answer or phased lifecycle.
 
     Usage:
         runtime = AgentRuntime(llm, budget_tracker, event_bus, ...)
@@ -92,6 +101,7 @@ class AgentRuntime:
         report_template_handler: Optional[Callable] = None,
         stream: bool = False,
         stall_config: Optional[StallDetectionConfig] = None,
+        simple_query_bypass: Optional[SimpleQueryBypassConfig] = None,
         budget_config: Optional[BudgetConfig] = None,
         agent_file_store: Optional[AgentFileStore] = None,
     ) -> None:
@@ -104,6 +114,7 @@ class AgentRuntime:
         self._report_template_handler = report_template_handler
         self._stream = stream
         self._stall_config = stall_config
+        self._simple_query_bypass = simple_query_bypass or SimpleQueryBypassConfig()
         self._budget_config = budget_config
         self._file_store = agent_file_store
 
@@ -174,8 +185,61 @@ class AgentRuntime:
         total_usage = TokenUsage()
         errors: List[ErrorEntry] = []
         phases_hitting_limit: List[str] = []
+        execution_metadata.execution_path = EXECUTION_PATH_FULL
 
         try:
+            routing_decision = await self._route_execution_path(
+                config=config,
+                input=input,
+                node=node,
+                workflow=workflow,
+                total_usage=total_usage,
+            )
+            execution_metadata.routing_decision = routing_decision
+            selected_path = routing_decision.get("selected_path", EXECUTION_PATH_FULL)
+            execution_metadata.execution_path = selected_path
+
+            if selected_path == EXECUTION_PATH_DIRECT:
+                direct_result = await self._run_direct_answer(
+                    config=config,
+                    input=input,
+                    node=node,
+                    workflow=workflow,
+                    total_usage=total_usage,
+                )
+                if direct_result.get("escalate_to_full_workflow"):
+                    execution_metadata.execution_path = EXECUTION_PATH_FULL
+                    routing_decision["initial_selected_path"] = EXECUTION_PATH_DIRECT
+                    routing_decision["selected_path"] = EXECUTION_PATH_FULL
+                    routing_decision["escalated_after_direct_answer"] = True
+                    routing_decision["escalation_reason"] = direct_result.get("reason")
+                else:
+                    routing_decision["escalated_after_direct_answer"] = False
+                    output = self._build_direct_output(
+                        task_id=task_id,
+                        config=config,
+                        direct_result=direct_result,
+                        total_usage=total_usage,
+                        execution_metadata=execution_metadata,
+                        errors=errors,
+                        start_time=start_time,
+                    )
+                    node.status = AgentStatus.COMPLETED
+                    node.result = output
+                    self._persist_output(output)
+
+                    await self._event_bus.publish(agent_completed(
+                        workflow_id=workflow.workflow_id,
+                        task_id=task_id,
+                        agent_id=config.agent_id,
+                        summary=output.summary,
+                        token_usage={
+                            "input_tokens": total_usage.input_tokens,
+                            "output_tokens": total_usage.output_tokens,
+                        },
+                    ))
+                    return output
+
             # ── Phase 1: Plan ──
             plan_result = await self._run_phase(
                 phase_runner=phase_runner,
@@ -424,12 +488,35 @@ class AgentRuntime:
 
         except BudgetExceededException as e:
             logger.warning(f"Budget exceeded for agent {config.agent_id}: {e}")
+
+            # Persist any in-progress phase data that was interrupted.
+            # The phase_runner tracks the current PhaseResult which
+            # accumulates tool_calls_made incrementally.
+            partial_phase = getattr(phase_runner, '_in_progress_result', None)
+            if partial_phase and partial_phase.tool_calls_made:
+                partial_phase.content = None  # No LLM summary was produced
+                partial_phase.iterations = len([
+                    tc for tc in partial_phase.tool_calls_made
+                ]) or partial_phase.iterations
+                self._persist_phase(partial_phase, memory)
+                self._accumulate_usage(total_usage, partial_phase)
+                self._accumulate_tool_calls(execution_metadata, partial_phase)
+                phase_name = partial_phase.phase.value
+                if phase_name not in execution_metadata.phases_completed:
+                    execution_metadata.phases_completed.append(phase_name)
+
+            # Include limit type in the detail for specificity
+            limit_type = getattr(e, 'limit_type', 'unknown')
+            detail = str(e)
+            if limit_type != 'unknown':
+                detail = f"[{limit_type}] {detail}"
+
             output = self._build_partial_output(
                 task_id=task_id,
                 config=config,
                 memory=memory,
                 reason="budget_exceeded",
-                detail=str(e),
+                detail=detail,
                 total_usage=total_usage,
                 execution_metadata=execution_metadata,
                 errors=errors,
@@ -437,6 +524,9 @@ class AgentRuntime:
             )
             node.status = AgentStatus.FAILED
             node.result = output
+
+            # Persist output + status even on failure
+            self._persist_output(output)
 
             await self._event_bus.publish(agent_failed(
                 workflow_id=workflow.workflow_id,
@@ -508,6 +598,16 @@ class AgentRuntime:
             cause = e.__cause__
             if isinstance(cause, BudgetExceededException):
                 reason = "budget_exceeded"
+                # Persist partial phase data for wrapped budget exceptions too
+                partial_phase = getattr(phase_runner, '_in_progress_result', None)
+                if partial_phase and partial_phase.tool_calls_made:
+                    partial_phase.content = None
+                    self._persist_phase(partial_phase, memory)
+                    self._accumulate_usage(total_usage, partial_phase)
+                    self._accumulate_tool_calls(execution_metadata, partial_phase)
+                    phase_name = partial_phase.phase.value
+                    if phase_name not in execution_metadata.phases_completed:
+                        execution_metadata.phases_completed.append(phase_name)
             else:
                 reason = "error"
             output = self._build_partial_output(
@@ -523,6 +623,9 @@ class AgentRuntime:
             )
             node.status = AgentStatus.FAILED
             node.result = output
+
+            # Persist output + status even on failure
+            self._persist_output(output)
 
             await self._event_bus.publish(agent_failed(
                 workflow_id=workflow.workflow_id,
@@ -584,7 +687,13 @@ class AgentRuntime:
             registry.register(tool)
         for tool in build_review_tools(memory):
             registry.register(tool)
-        for tool in build_report_tools(memory, self._report_template_handler, output_schema):
+        for tool in build_report_tools(
+            memory,
+            self._report_template_handler,
+            output_schema,
+            default_role=node.config.role,
+            default_sub_role=node.config.sub_role,
+        ):
             registry.register(tool)
 
         # Agent management tools — only register when:
@@ -753,6 +862,382 @@ class AgentRuntime:
         for tc_info in result.tool_calls_made:
             metadata.tools_called.append(tc_info)
 
+    async def _route_execution_path(
+        self,
+        config: AgentConfig,
+        input: AgentInput,
+        node: AgentNode,
+        workflow: WorkflowExecution,
+        total_usage: TokenUsage,
+    ) -> Dict[str, Any]:
+        """Decide whether to run direct-answer mode or full workflow."""
+        cfg = self._simple_query_bypass
+        decision: Dict[str, Any] = {
+            "mode": EXECUTION_PATH_FULL,
+            "confidence": 0.0,
+            "reason": "",
+            "requires_external_data": False,
+            "selected_path": EXECUTION_PATH_FULL,
+            "policy_reason": "",
+            "parser_status": "skipped",
+        }
+
+        if not cfg.enabled:
+            decision.update({
+                "reason": "Simple-query bypass is disabled.",
+                "policy_reason": "bypass_disabled",
+            })
+            return decision
+
+        if cfg.force_full_workflow_if_output_schema and input.output_schema:
+            decision.update({
+                "reason": "Output schema is required for this task.",
+                "policy_reason": "output_schema_requires_full_workflow",
+            })
+            return decision
+
+        routing_model_config = ModelConfig(
+            temperature=0.0,
+            top_p=1.0,
+            max_tokens=max(96, min(256, cfg.direct_answer_max_tokens)),
+        )
+        messages = self._build_routing_messages(input)
+        response = await self._call_llm_without_tools(
+            messages=messages,
+            config=config,
+            node=node,
+            workflow=workflow,
+            model_config=routing_model_config,
+            total_usage=total_usage,
+        )
+
+        raw_content = (response.content or "").strip()
+        parsed = self._parse_json_object(raw_content)
+        if not isinstance(parsed, dict):
+            decision.update({
+                "reason": "Routing output was not valid JSON.",
+                "policy_reason": "invalid_router_output",
+                "parser_status": "invalid_json",
+                "raw_response_preview": raw_content[:300],
+            })
+            return decision
+
+        mode = str(parsed.get("mode", EXECUTION_PATH_FULL)).strip().lower()
+        if mode not in {EXECUTION_PATH_DIRECT, EXECUTION_PATH_FULL}:
+            mode = EXECUTION_PATH_FULL
+        confidence = self._normalize_confidence(parsed.get("confidence", 0.0))
+        reason = str(parsed.get("reason", "")).strip() or "No routing reason provided."
+        requires_external_data = self._coerce_bool(
+            parsed.get("requires_external_data"),
+            default=False,
+        )
+
+        decision.update({
+            "mode": mode,
+            "confidence": confidence,
+            "reason": reason,
+            "requires_external_data": requires_external_data,
+            "parser_status": "ok",
+            "raw_response_preview": raw_content[:300],
+        })
+
+        if mode != EXECUTION_PATH_DIRECT:
+            decision["selected_path"] = EXECUTION_PATH_FULL
+            decision["policy_reason"] = "router_selected_full_workflow"
+            return decision
+
+        if confidence < cfg.route_confidence_threshold:
+            decision["selected_path"] = EXECUTION_PATH_FULL
+            decision["policy_reason"] = "route_confidence_below_threshold"
+            return decision
+
+        if requires_external_data:
+            decision["selected_path"] = EXECUTION_PATH_FULL
+            decision["policy_reason"] = "router_requires_external_data"
+            return decision
+
+        decision["selected_path"] = EXECUTION_PATH_DIRECT
+        decision["policy_reason"] = "router_selected_direct_answer"
+        return decision
+
+    async def _run_direct_answer(
+        self,
+        config: AgentConfig,
+        input: AgentInput,
+        node: AgentNode,
+        workflow: WorkflowExecution,
+        total_usage: TokenUsage,
+    ) -> Dict[str, Any]:
+        """Attempt direct response without tools; may request escalation."""
+        cfg = self._simple_query_bypass
+        model_config = ModelConfig(
+            temperature=min(config.model_config.temperature, 0.3),
+            top_p=config.model_config.top_p,
+            max_tokens=cfg.direct_answer_max_tokens,
+        )
+        messages = self._build_direct_answer_messages(input)
+        response = await self._call_llm_without_tools(
+            messages=messages,
+            config=config,
+            node=node,
+            workflow=workflow,
+            model_config=model_config,
+            total_usage=total_usage,
+        )
+
+        raw_content = (response.content or "").strip()
+        parsed = self._parse_json_object(raw_content)
+
+        answer = ""
+        reason = ""
+        confidence = 0.0
+        needs_full_workflow = True
+        parser_status = "invalid_json"
+
+        if isinstance(parsed, dict):
+            parser_status = "ok"
+            answer = str(parsed.get("answer", "")).strip()
+            reason = str(parsed.get("reason", "")).strip()
+            confidence = self._normalize_confidence(parsed.get("confidence", 0.0))
+            needs_full_workflow = self._coerce_bool(
+                parsed.get("needs_full_workflow"),
+                default=False,
+            )
+            if not answer and not needs_full_workflow:
+                needs_full_workflow = True
+                reason = reason or "Direct response did not include an answer."
+        else:
+            answer = raw_content
+            reason = "Direct-answer output was not valid JSON."
+            confidence = 0.0
+            needs_full_workflow = True
+
+        if not reason:
+            reason = "Direct-answer attempt completed."
+
+        escalate = cfg.allow_escalation_to_full_workflow and (
+            needs_full_workflow
+            or confidence < cfg.route_confidence_threshold
+        )
+
+        return {
+            "answer": answer,
+            "confidence": confidence,
+            "needs_full_workflow": needs_full_workflow,
+            "reason": reason,
+            "parser_status": parser_status,
+            "raw_response_preview": raw_content[:300],
+            "escalate_to_full_workflow": escalate,
+        }
+
+    async def _call_llm_without_tools(
+        self,
+        *,
+        messages: List[Message],
+        config: AgentConfig,
+        node: AgentNode,
+        workflow: WorkflowExecution,
+        model_config: ModelConfig,
+        total_usage: TokenUsage,
+    ):
+        """Run an LLM call with no tools and account for budget/usage."""
+        self._budget_tracker.check_budget(node, workflow)
+        response = await self._llm.chat_with_tools(
+            messages=messages,
+            tools=[],
+            model=config.model,
+            model_config=model_config,
+            stream=False,
+            on_token=None,
+        )
+
+        usage = response.usage or TokenUsage()
+        cost = self._budget_tracker.record_usage(node, workflow, usage, config.model)
+        total_usage.input_tokens += usage.input_tokens
+        total_usage.output_tokens += usage.output_tokens
+        total_usage.total_cost += cost
+        return response
+
+    def _build_routing_messages(self, input: AgentInput) -> List[Message]:
+        """Build the routing prompt requesting strict JSON output."""
+        user_payload = [
+            f"Task: {input.task}",
+            f"Has output schema: {bool(input.output_schema)}",
+            f"Has raw_data: {bool(input.raw_data)}",
+            f"RAG results count: {len(input.rag_results or [])}",
+            f"Has additional context: {bool(input.additional_context)}",
+            "",
+            "Respond with JSON only using this schema:",
+            '{"mode":"direct_answer|full_workflow","confidence":0.0,'
+            '"reason":"...","requires_external_data":false}',
+        ]
+        return [
+            Message(
+                role=MessageRole.SYSTEM,
+                content=(
+                    "You are a routing controller. Decide if a task should be "
+                    "answered directly without tools or run through a full multi-phase workflow. "
+                    "Return JSON only."
+                ),
+            ),
+            Message(role=MessageRole.USER, content="\n".join(user_payload)),
+        ]
+
+    def _build_direct_answer_messages(self, input: AgentInput) -> List[Message]:
+        """Build prompt for direct-answer mode with optional escalation signal."""
+        context_parts = [f"Task: {input.task}"]
+        if input.additional_context:
+            context_parts.append(
+                f"Additional context:\n{str(input.additional_context)[:1200]}"
+            )
+        if input.raw_data:
+            raw_data_str = json.dumps(input.raw_data, ensure_ascii=False, default=str)
+            context_parts.append(f"raw_data (truncated):\n{raw_data_str[:2000]}")
+        if input.rag_results:
+            rag_preview = json.dumps((input.rag_results or [])[:3], ensure_ascii=False, default=str)
+            context_parts.append(f"rag_results (first 3, truncated):\n{rag_preview[:2000]}")
+
+        context_parts.append(
+            "Respond with JSON only: "
+            '{"answer":"...","confidence":0.0,"needs_full_workflow":false,"reason":"..."}'
+        )
+        return [
+            Message(
+                role=MessageRole.SYSTEM,
+                content=(
+                    "Answer the user directly without tools when possible. "
+                    "If context is missing or uncertainty is high, set "
+                    '"needs_full_workflow" to true.'
+                ),
+            ),
+            Message(role=MessageRole.USER, content="\n\n".join(context_parts)),
+        ]
+
+    @staticmethod
+    def _parse_json_object(text: str) -> Optional[Dict[str, Any]]:
+        """Parse a JSON object from plain text or fenced-code output."""
+        raw = (text or "").strip()
+        if not raw:
+            return None
+
+        candidates: List[str] = [raw]
+        fence_matches = re.findall(r"```(?:json)?\s*([\s\S]*?)```", raw, flags=re.IGNORECASE)
+        candidates.extend(m.strip() for m in fence_matches if m.strip())
+
+        first_brace = raw.find("{")
+        last_brace = raw.rfind("}")
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            candidates.append(raw[first_brace:last_brace + 1].strip())
+
+        seen = set()
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            try:
+                parsed = json.loads(candidate)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+        return None
+
+    @staticmethod
+    def _normalize_confidence(value: Any) -> float:
+        """Normalize confidence into [0, 1]."""
+        try:
+            conf = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, min(1.0, conf))
+
+    @staticmethod
+    def _coerce_bool(value: Any, default: bool = False) -> bool:
+        """Coerce booleans from bool/string/number forms."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "1", "yes", "y"}:
+                return True
+            if lowered in {"false", "0", "no", "n"}:
+                return False
+        return default
+
+    def _build_direct_output(
+        self,
+        task_id: str,
+        config: AgentConfig,
+        direct_result: Dict[str, Any],
+        total_usage: TokenUsage,
+        execution_metadata: ExecutionMetadata,
+        errors: List[ErrorEntry],
+        start_time: float,
+    ) -> AgentOutput:
+        """Build final output for direct-answer execution path."""
+        execution_metadata.total_duration_ms = (time.time() - start_time) * 1000
+        answer = str(direct_result.get("answer", "")).strip()
+        confidence = self._normalize_confidence(direct_result.get("confidence", 0.0))
+        reason = str(direct_result.get("reason", "")).strip()
+        parser_status = str(direct_result.get("parser_status", "invalid_json"))
+        raw_preview = str(direct_result.get("raw_response_preview", ""))
+
+        if answer:
+            execution_metadata.phase_outputs["direct_answer"] = answer
+        execution_metadata.tools_called = []
+
+        status = "completed"
+        if confidence < self._simple_query_bypass.route_confidence_threshold:
+            status = "degraded"
+            errors.append(ErrorEntry(
+                source=ErrorSource.SYSTEM,
+                name="agent_runtime",
+                error_type="direct_answer_low_confidence",
+                message=(
+                    f"Direct answer confidence {confidence:.2f} is below threshold "
+                    f"{self._simple_query_bypass.route_confidence_threshold:.2f}."
+                ),
+                recoverable=True,
+            ))
+
+        if parser_status != "ok":
+            status = "degraded"
+            errors.append(ErrorEntry(
+                source=ErrorSource.SYSTEM,
+                name="agent_runtime",
+                error_type="direct_answer_parse_warning",
+                message=(
+                    "Direct-answer response was not valid JSON. "
+                    f"Preview: {raw_preview[:200]}"
+                ),
+                recoverable=True,
+            ))
+
+        summary = answer or reason or "Direct-answer path completed."
+        if len(summary) > 500:
+            summary = summary[:500] + "..."
+
+        findings: Dict[str, Any] = {
+            "direct_answer": answer,
+            "confidence": confidence,
+            "reason": reason,
+        }
+
+        return AgentOutput(
+            task_id=task_id,
+            agent_id=config.agent_id,
+            role=config.role,
+            sub_role=config.sub_role,
+            status=status,
+            summary=summary,
+            findings=findings,
+            errors=errors,
+            token_usage=total_usage,
+            execution_metadata=execution_metadata,
+        )
+
     def _build_output(
         self,
         task_id: str,
@@ -785,18 +1270,45 @@ class AgentRuntime:
         if len(summary) > 500:
             summary = summary[:500] + "..."
 
-        # Determine status based on iteration limit hits.
-        # "degraded" = all phases exhausted iteration budgets, output quality
-        # is likely very low.  Partial hits are still "completed" with a
+        # Determine status based on quality signals.
+        # "degraded" signals that the output exists but is likely incomplete:
+        #   - All phases hit iteration limits  (original rule)
+        #   - Act + report both hit limits  (primary data + synthesis degraded)
+        #   - 2+ phases hit limits AND review explicitly failed
+        # Partial hits with passing review are still "completed" with a
         # warning appended to errors.
         status = "completed"
+        review_failed = (
+            memory.review_checklist
+            and any(item.rating == "fail" for item in memory.review_checklist)
+        )
+
         if phases_hitting_limit:
-            if len(phases_hitting_limit) >= 4:
+            critical_phases_hit = {"act", "report"}.issubset(set(phases_hitting_limit))
+            many_limits_and_review_failed = (
+                len(phases_hitting_limit) >= 2 and review_failed
+            )
+
+            if (len(phases_hitting_limit) >= 4
+                    or critical_phases_hit
+                    or many_limits_and_review_failed):
                 status = "degraded"
                 logger.warning(
-                    f"All phases hit iteration limits for agent "
-                    f"{config.agent_id}: {phases_hitting_limit}"
+                    f"Agent {config.agent_id} output degraded: "
+                    f"phases_hitting_limit={phases_hitting_limit}, "
+                    f"review_failed={review_failed}"
                 )
+                errors.append(ErrorEntry(
+                    source=ErrorSource.SYSTEM,
+                    name="agent_runtime",
+                    error_type="quality_degraded",
+                    message=(
+                        f"Output quality degraded. "
+                        f"Phases hitting limits: {', '.join(phases_hitting_limit)}."
+                        + (f" Review failed." if review_failed else "")
+                    ),
+                    recoverable=True,
+                ))
             else:
                 errors.append(ErrorEntry(
                     source=ErrorSource.SYSTEM,

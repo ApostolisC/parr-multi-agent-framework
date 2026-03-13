@@ -1,0 +1,37 @@
+[
+  {
+    "index": 0,
+    "description": "Conduct a broad search on the definition of Data Protection Impact Assessment (DPIA).",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Conducted a broad search on the definition, purpose, and importance of Data Protection Impact Assessment (DPIA). Key findings logged."
+  },
+  {
+    "index": 1,
+    "description": "Investigate the purpose of Data Protection Impact Assessments (DPIA).",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Investigated the purpose of Data Protection Impact Assessments (DPIA) and logged relevant findings."
+  },
+  {
+    "index": 2,
+    "description": "Explore the importance of DPIA in data protection regulations.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Explored the importance of DPIA in data protection regulations and logged relevant findings."
+  },
+  {
+    "index": 3,
+    "description": "Gather relevant sources and documents that explain DPIA and its regulatory context.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 4,
+    "description": "Synthesize findings on DPIA into a structured report.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  }
+]

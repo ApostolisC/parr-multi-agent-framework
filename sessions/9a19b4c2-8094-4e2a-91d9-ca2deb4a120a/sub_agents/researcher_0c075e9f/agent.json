@@ -1,0 +1,11 @@
+{
+  "task_id": "0c075e9f-0510-48d4-a6d5-1d01962cd379",
+  "agent_id": "e3e1271b-725c-4407-a99e-ef82a0706618",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Investigate other methodologies for data protection assessments, including their definitions and key features.",
+  "status": "running",
+  "depth": 1,
+  "parent_task_id": "87f58f2b-ab81-49df-8e27-182b358c2f88",
+  "model": "gpt-4o-mini"
+}

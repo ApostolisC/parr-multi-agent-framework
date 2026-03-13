@@ -1,0 +1,37 @@
+[
+  {
+    "index": 0,
+    "description": "Conduct a broad search on Data Protection Impact Assessment (DPIA) to gather foundational information.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Conducted a broad search on DPIA and logged foundational information."
+  },
+  {
+    "index": 1,
+    "description": "Identify key legal frameworks and regulations that mandate DPIAs, such as GDPR.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Explore the significance of DPIAs in mitigating data protection risks.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Investigate best practices for conducting DPIAs.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 4,
+    "description": "Compile findings into a structured report on DPIAs and their significance in data protection law.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  }
+]

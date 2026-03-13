@@ -1,0 +1,33 @@
+[
+  {
+    "name": "create_todo_list",
+    "phase": "plan",
+    "arguments": {
+      "items": [
+        {
+          "description": "Research the definition and purpose of Data Protection Impact Assessment (DPIA).",
+          "priority": "high"
+        },
+        {
+          "description": "Identify the key components of a DPIA process.",
+          "priority": "high"
+        },
+        {
+          "description": "Determine when a DPIA is required under GDPR.",
+          "priority": "high"
+        },
+        {
+          "description": "Explore the purpose and benefits of conducting a DPIA.",
+          "priority": "medium"
+        },
+        {
+          "description": "Gather examples of scenarios that would necessitate a DPIA.",
+          "priority": "medium"
+        }
+      ]
+    },
+    "result_content": "Created todo list with 5 items.",
+    "success": true,
+    "error": null
+  }
+]

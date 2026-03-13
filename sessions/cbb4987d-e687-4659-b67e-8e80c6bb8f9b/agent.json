@@ -1,0 +1,11 @@
+{
+  "task_id": "3d4bf3d2-2451-4b4f-8785-73214f8209c4",
+  "agent_id": "767aa1ba-a793-4ab5-9d5e-59ebdd157e95",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "provide pentest methodology for wifi and web application. Use subagents please",
+  "status": "failed",
+  "depth": 0,
+  "parent_task_id": null,
+  "model": "gpt-4o-mini"
+}

@@ -1,0 +1,22 @@
+[
+  {
+    "criterion": "Does the collected data/analysis address the original task fully?",
+    "rating": "fail",
+    "justification": "No findings were recorded, and the searches yielded no relevant case studies or examples of WiFi penetration testing methodologies."
+  },
+  {
+    "criterion": "Are there gaps, contradictions, or areas where quality is insufficient?",
+    "rating": "fail",
+    "justification": "There are significant gaps as no data or examples were found to support the analysis of WiFi penetration testing methodologies."
+  },
+  {
+    "criterion": "Were any tools or sub-agents that failed critical to the task?",
+    "rating": "fail",
+    "justification": "The search for case studies and examples did not yield any results, indicating a failure in the research approach."
+  },
+  {
+    "criterion": "Is the quality of findings sufficient for reporting?",
+    "rating": "fail",
+    "justification": "There are no findings to report, making the quality of findings non-existent."
+  }
+]

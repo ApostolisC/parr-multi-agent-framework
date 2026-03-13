@@ -1,0 +1,30 @@
+[
+  {
+    "index": 0,
+    "description": "Research the reconnaissance phase of WiFi penetration testing methodology, focusing on techniques and tools used.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "No findings were recorded for the reconnaissance phase of WiFi penetration testing methodology."
+  },
+  {
+    "index": 1,
+    "description": "Research the scanning phase of WiFi penetration testing methodology, detailing the types of scans and tools utilized.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "No findings were recorded for the scanning phase of WiFi penetration testing methodology."
+  },
+  {
+    "index": 2,
+    "description": "Investigate the exploitation phase of WiFi penetration testing methodology, including common vulnerabilities and exploitation techniques.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "No findings were recorded for the exploitation phase of WiFi penetration testing methodology."
+  },
+  {
+    "index": 3,
+    "description": "Examine the reporting phase of WiFi penetration testing methodology, outlining what should be included in a comprehensive report.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "No findings were recorded for the reporting phase of WiFi penetration testing methodology."
+  }
+]

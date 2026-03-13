@@ -1,0 +1,11 @@
+{
+  "task_id": "723374c9-005e-474b-8b77-4d2613fdc499",
+  "agent_id": "d19ecbe5-d2b2-467f-b0d0-bf7c5aa4d567",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "Investigate techniques used in WiFi penetration testing, looking into methods like packet sniffing, man-in-the-middle, and others.",
+  "status": "failed",
+  "depth": 2,
+  "parent_task_id": "7afedb57-08a2-4b20-ab16-e63cb9f9fb8c",
+  "model": "gpt-4o-mini"
+}

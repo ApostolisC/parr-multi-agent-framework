@@ -1,0 +1,11 @@
+{
+  "task_id": "e0b855f9-dd41-4c99-9f58-2ffba1ba2486",
+  "agent_id": "e2ef324f-7655-4bd2-93e3-fc7fb9fd1788",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Research existing penetration testing methodologies specific to web applications, focusing on frameworks like OWASP and NIST. Extract detailed steps and phases involved in these methodologies.",
+  "status": "completed",
+  "depth": 2,
+  "parent_task_id": "6dd7d679-b491-49ae-83ed-c8e94051334e",
+  "model": "gpt-4o-mini"
+}

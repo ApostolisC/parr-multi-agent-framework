@@ -1,0 +1,23 @@
+[
+  {
+    "index": 0,
+    "description": "Search for documents about AI in healthcare",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Found 5 relevant documents"
+  },
+  {
+    "index": 1,
+    "description": "Read the most relevant results in detail",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Read 3 key sections"
+  },
+  {
+    "index": 2,
+    "description": "Log findings with sources",
+    "priority": "medium",
+    "completed": true,
+    "completion_summary": "Logged 3 findings with citations"
+  }
+]

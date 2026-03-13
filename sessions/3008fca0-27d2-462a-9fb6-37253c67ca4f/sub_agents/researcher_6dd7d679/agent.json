@@ -1,0 +1,11 @@
+{
+  "task_id": "6dd7d679-b491-49ae-83ed-c8e94051334e",
+  "agent_id": "e5f3328d-ec02-42d9-833f-e49b87e8c5ec",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Research and outline a penetration testing methodology for web applications.",
+  "status": "failed",
+  "depth": 1,
+  "parent_task_id": "32b47714-bf31-46e9-8b52-a71478ab41a4",
+  "model": "gpt-4o-mini"
+}

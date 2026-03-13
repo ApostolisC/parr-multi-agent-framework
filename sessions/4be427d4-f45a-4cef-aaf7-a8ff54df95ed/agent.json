@@ -1,0 +1,11 @@
+{
+  "task_id": "122d5606-9537-4e85-924e-fe7b2bfa2565",
+  "agent_id": "5074433b-5c34-4e7f-9072-ac3c667833ef",
+  "role": "security expert",
+  "sub_role": null,
+  "task": "what are the risks during a security assessment?",
+  "status": "running",
+  "depth": 0,
+  "parent_task_id": null,
+  "model": ""
+}

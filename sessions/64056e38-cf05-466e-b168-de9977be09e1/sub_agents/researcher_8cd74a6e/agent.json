@@ -1,0 +1,11 @@
+{
+  "task_id": "8cd74a6e-125a-4841-bc79-99dbbecf51c3",
+  "agent_id": "82c88bfb-5f73-443a-b9fb-372b13e964d7",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Identify and summarize other methodologies for data protection assessments beyond DPIAs.",
+  "status": "completed",
+  "depth": 1,
+  "parent_task_id": "7281365e-1b2e-4ceb-bcaa-fd5badf04804",
+  "model": "gpt-4o-mini"
+}

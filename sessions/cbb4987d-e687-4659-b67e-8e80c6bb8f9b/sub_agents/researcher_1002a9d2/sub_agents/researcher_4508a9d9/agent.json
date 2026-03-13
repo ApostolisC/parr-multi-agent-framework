@@ -1,0 +1,11 @@
+{
+  "task_id": "4508a9d9-2ed3-44d8-b2ea-727b2faebc04",
+  "agent_id": "180d3d30-c755-416c-9f9e-00615db18dc9",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Compile information on the reporting phase, including best practices for documenting findings and recommendations for remediation.",
+  "status": "failed",
+  "depth": 2,
+  "parent_task_id": "1002a9d2-7d98-4b35-a48c-977348d262da",
+  "model": "gpt-4o-mini"
+}

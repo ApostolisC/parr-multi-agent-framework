@@ -1,0 +1,11 @@
+{
+  "task_id": "6dad92c1-f450-47a2-bfa3-9b99e4e23fc9",
+  "agent_id": "27a0741c-e21d-466c-85cd-934ed41f7481",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "Identify and list commonly used tools in WiFi penetration testing, focusing on tools like Aircrack-ng, Kismet, and others.",
+  "status": "failed",
+  "depth": 2,
+  "parent_task_id": "7afedb57-08a2-4b20-ab16-e63cb9f9fb8c",
+  "model": "gpt-4o-mini"
+}

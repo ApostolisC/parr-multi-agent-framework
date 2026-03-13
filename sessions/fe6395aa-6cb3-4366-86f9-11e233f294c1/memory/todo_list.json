@@ -1,0 +1,23 @@
+[
+  {
+    "index": 0,
+    "description": "Search for authoritative sources (e.g., GDPR, ICO, EU guidelines) to identify the phases of a Data Protection Impact Assessment (DPIA).",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Identified authoritative sources (ICO and EDPB) outlining the phases of a DPIA."
+  },
+  {
+    "index": 1,
+    "description": "Extract and list the distinct phases of a DPIA from the sources found.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Extracted and listed distinct DPIA phases from ICO and EDPB authoritative sources."
+  },
+  {
+    "index": 2,
+    "description": "Provide context and brief explanation for each phase, citing relevant sources.",
+    "priority": "medium",
+    "completed": true,
+    "completion_summary": "Provided context and brief explanation for each DPIA phase from ICO and EDPB sources."
+  }
+]

@@ -1,0 +1,11 @@
+{
+  "task_id": "9a0918f5-d071-49d5-af98-7f09f6831b5b",
+  "agent_id": "1c7fa30e-c396-4bf3-89bb-1bbc02e137f2",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "Identify specific risks related to different types of security assessments (e.g., penetration testing, vulnerability assessments, etc.).",
+  "status": "running",
+  "depth": 1,
+  "parent_task_id": "606beff0-be89-4e10-b59f-af5e5c0356cc",
+  "model": "gpt-4o-mini"
+}

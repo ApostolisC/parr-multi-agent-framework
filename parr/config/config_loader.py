@@ -55,9 +55,11 @@ from ..core_types import (
     AgentConfig,
     BudgetConfig,
     CostConfig,
+    LLMRateLimitConfig,
     ModelConfig,
     ModelPricing,
     Phase,
+    SimpleQueryBypassConfig,
     StallDetectionConfig,
     ToolDef,
 )
@@ -91,6 +93,10 @@ class ConfigBundle:
     phase_limits: Dict[Phase, int]
     provider_config: Optional[ProviderConfig] = None
     stall_config: Optional[StallDetectionConfig] = None
+    llm_rate_limit: Optional[LLMRateLimitConfig] = None
+    simple_query_bypass: SimpleQueryBypassConfig = field(
+        default_factory=SimpleQueryBypassConfig
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +287,7 @@ def build_llm_from_provider_config(
     provider_config: ProviderConfig,
     model: str,
     cost_config: Optional[CostConfig] = None,
+    llm_rate_limit: Optional[LLMRateLimitConfig] = None,
 ) -> Any:
     """
     Create a ToolCallingLLM instance from a resolved ProviderConfig.
@@ -289,6 +296,7 @@ def build_llm_from_provider_config(
         provider_config: Resolved provider settings.
         model: Model name or deployment name.
         cost_config: Optional pricing config for cost tracking.
+        llm_rate_limit: Optional queue/rate-limit settings for all LLM calls.
 
     Returns:
         A ToolCallingLLM-compatible adapter instance.
@@ -299,6 +307,7 @@ def build_llm_from_provider_config(
         provider_type=provider_config.provider_type,
         model=model,
         cost_config=cost_config,
+        llm_rate_limit=llm_rate_limit,
         **provider_config.kwargs,
     )
 
@@ -364,6 +373,8 @@ def load_config(
     raw_budget = budget_data.get("budget_defaults", {})
     raw_phase_limits = budget_data.get("phase_limits", {})
     raw_stall = budget_data.get("stall_detection", {})
+    raw_llm_rate_limit = budget_data.get("llm_rate_limit", {})
+    raw_simple_query_bypass = budget_data.get("simple_query_bypass", {})
     raw_roles = roles_data.get("roles", {})
 
     # -- Resolve tools (declarative vs legacy) -------------------------------
@@ -397,7 +408,9 @@ def load_config(
         models=raw_models,
         budget=raw_budget,
         phase_limits=raw_phase_limits,
+        llm_rate_limit=raw_llm_rate_limit,
         tool_names=list(built_tools.keys()),
+        simple_query_bypass=raw_simple_query_bypass,
     )
     errors.extend(tools_errors)
     if errors:
@@ -414,6 +427,12 @@ def load_config(
 
     # -- Build stall detection config ----------------------------------------
     stall_config = _build_stall_config(raw_stall) if raw_stall else None
+
+    # -- Build LLM rate-limit config -----------------------------------------
+    llm_rate_limit = _build_llm_rate_limit_config(raw_llm_rate_limit)
+
+    # -- Build simple-query bypass config ------------------------------------
+    simple_query_bypass = _build_simple_query_bypass_config(raw_simple_query_bypass)
 
     # -- Build DomainAdapter -------------------------------------------------
     domain_adapter = _build_domain_adapter(
@@ -437,6 +456,8 @@ def load_config(
         f"{len(built_tools)} tool(s), "
         f"budget max_tokens={default_budget.max_tokens}"
         + (f", provider={provider_config.provider_type}" if provider_config else "")
+        + (", llm_rate_limit=enabled" if llm_rate_limit and llm_rate_limit.enabled else "")
+        + (", simple_query_bypass=enabled" if simple_query_bypass.enabled else "")
     )
 
     return ConfigBundle(
@@ -446,6 +467,8 @@ def load_config(
         phase_limits=phase_limits,
         provider_config=provider_config,
         stall_config=stall_config,
+        llm_rate_limit=llm_rate_limit,
+        simple_query_bypass=simple_query_bypass,
     )
 
 
@@ -476,6 +499,7 @@ def _build_budget_config(raw_budget: Dict[str, Any]) -> BudgetConfig:
         max_sub_agents_total=raw_budget.get("max_sub_agents_total", 3),
         inherit_remaining=raw_budget.get("inherit_remaining", True),
         child_budget_fraction=raw_budget.get("child_budget_fraction", 0.5),
+        parent_recovery_budget_pct=raw_budget.get("parent_recovery_budget_pct", 0.10),
         max_child_review_cycles=raw_budget.get("max_child_review_cycles"),
         context_soft_compaction_pct=raw_budget.get("context_soft_compaction_pct", 0.40),
         context_hard_truncation_pct=raw_budget.get("context_hard_truncation_pct", 0.65),
@@ -490,6 +514,49 @@ def _build_stall_config(raw_stall: Dict[str, Any]) -> StallDetectionConfig:
         max_fw_only_consecutive_iterations=raw_stall.get("max_fw_only_consecutive_iterations", 10),
         max_duplicate_call_iterations=raw_stall.get("max_duplicate_call_iterations", 4),
         duplicate_call_window=raw_stall.get("duplicate_call_window", 8),
+    )
+
+
+def _build_llm_rate_limit_config(raw_limit: Dict[str, Any]) -> Optional[LLMRateLimitConfig]:
+    """Build LLMRateLimitConfig from parsed budget.yaml llm_rate_limit section."""
+    if not raw_limit:
+        return None
+
+    max_requests_per_window = raw_limit.get("max_requests_per_window")
+    max_requests_per_minute = raw_limit.get("max_requests_per_minute")
+    if max_requests_per_window is None and max_requests_per_minute is not None:
+        max_requests_per_window = max_requests_per_minute
+    max_tokens_per_window = raw_limit.get("max_tokens_per_window")
+    max_tokens_per_minute = raw_limit.get("max_tokens_per_minute")
+    if max_tokens_per_window is None and max_tokens_per_minute is not None:
+        max_tokens_per_window = max_tokens_per_minute
+
+    return LLMRateLimitConfig(
+        enabled=bool(raw_limit.get("enabled", True)),
+        max_concurrent_requests=raw_limit.get("max_concurrent_requests"),
+        max_requests_per_window=max_requests_per_window,
+        max_tokens_per_window=max_tokens_per_window,
+        window_seconds=float(raw_limit.get("window_seconds", 60.0)),
+        max_queue_size=raw_limit.get("max_queue_size"),
+        acquire_timeout_seconds=raw_limit.get("acquire_timeout_seconds"),
+    )
+
+
+def _build_simple_query_bypass_config(raw_cfg: Dict[str, Any]) -> SimpleQueryBypassConfig:
+    """Build SimpleQueryBypassConfig from parsed budget.yaml section."""
+    if not raw_cfg:
+        return SimpleQueryBypassConfig()
+
+    return SimpleQueryBypassConfig(
+        enabled=bool(raw_cfg.get("enabled", True)),
+        route_confidence_threshold=float(raw_cfg.get("route_confidence_threshold", 0.80)),
+        force_full_workflow_if_output_schema=bool(
+            raw_cfg.get("force_full_workflow_if_output_schema", True)
+        ),
+        allow_escalation_to_full_workflow=bool(
+            raw_cfg.get("allow_escalation_to_full_workflow", True)
+        ),
+        direct_answer_max_tokens=int(raw_cfg.get("direct_answer_max_tokens", 512)),
     )
 
 
@@ -784,12 +851,19 @@ def create_orchestrator_from_config(
                     "Pass model_override or define models in models.yaml."
                 ])
             llm = build_llm_from_provider_config(
-                provider_config, model, bundle.cost_config,
+                provider_config,
+                model,
+                bundle.cost_config,
+                llm_rate_limit=bundle.llm_rate_limit,
             )
             logger.info(
                 f"LLM auto-created: provider={provider_config.provider_type}, "
                 f"model={model}"
             )
+    elif bundle.llm_rate_limit and bundle.llm_rate_limit.enabled:
+        from ..adapters.llm_rate_limiter import RateLimitedToolCallingLLM
+        if not isinstance(llm, RateLimitedToolCallingLLM):
+            llm = RateLimitedToolCallingLLM(llm=llm, config=bundle.llm_rate_limit)
 
     return Orchestrator(
         llm=llm,
@@ -801,4 +875,5 @@ def create_orchestrator_from_config(
         max_review_cycles=max_review_cycles,
         stream=stream,
         stall_config=bundle.stall_config,
+        simple_query_bypass=bundle.simple_query_bypass,
     )

@@ -1,0 +1,37 @@
+[
+  {
+    "index": 0,
+    "description": "Research and identify various methodologies for data protection assessments beyond Data Protection Impact Assessments (DPIAs).",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Identified methodologies such as the EU AI Act and fairness auditing for data protection assessments."
+  },
+  {
+    "index": 1,
+    "description": "Extract detailed evidence and data points regarding each identified methodology, including their definitions, applications, and effectiveness.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Extracted detailed evidence regarding the EU AI Act and privacy risks in AI systems."
+  },
+  {
+    "index": 2,
+    "description": "Gather case studies or examples where these methodologies have been implemented successfully.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Compile findings into a structured summary, highlighting key differences and advantages of each methodology compared to DPIAs.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Compiled findings into a structured summary highlighting methodologies like the EU AI Act and fairness auditing."
+  },
+  {
+    "index": 4,
+    "description": "Cite all sources accurately for reference in the final report.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Cited all sources accurately for reference in the final report."
+  }
+]

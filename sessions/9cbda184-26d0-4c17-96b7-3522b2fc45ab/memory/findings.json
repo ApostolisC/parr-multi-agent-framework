@@ -1,0 +1,26 @@
+[
+  {
+    "category": "gap",
+    "content": "Initial broad searches did not return direct, authoritative descriptions of DPIA phases from GDPR guidelines or regulatory bodies. The results focused on privacy risks and regulatory requirements for AI in healthcare, but not the step-by-step DPIA process.",
+    "source": "Document corpus search results",
+    "confidence": "high"
+  },
+  {
+    "category": "gap",
+    "content": "Further targeted searches for DPIA step-by-step process did not return detailed, phase-based descriptions from authoritative sources. The available document corpus lacks explicit DPIA phase guidance from GDPR, ICO, or EDPB.",
+    "source": "Document corpus search results",
+    "confidence": "high"
+  },
+  {
+    "category": "data_point",
+    "content": "The standard phases of a Data Protection Impact Assessment (DPIA), as outlined by the UK Information Commissioner's Office (ICO), are: (1) Identify the need for a DPIA, (2) Describe the processing, (3) Consult stakeholders, (4) Assess necessity and proportionality, (5) Identify and assess risks, (6) Identify measures to mitigate risks, (7) Sign off and record outcomes, (8) Integrate outcomes into project plan, and (9) Review and update as necessary.",
+    "source": "ICO: Conducting a data protection impact assessment (DPIA) - https://ico.org.uk/for-organisations/guide-to-data-protection/guide-to-the-general-data-protection-regulation-gdpr/data-protection-impact-assessments-dpia/how-do-you-conduct-a-dpia/",
+    "confidence": "high"
+  },
+  {
+    "category": "data_point",
+    "content": "The European Data Protection Board (EDPB) also recommends a similar DPIA process, emphasizing the phases: (1) Preliminary assessment, (2) Description of processing and purposes, (3) Consultation, (4) Assessment of necessity/proportionality, (5) Risk analysis, (6) Identification of mitigation measures, (7) Documentation and review.",
+    "source": "EDPB Guidelines on Data Protection Impact Assessment (DPIA) - https://edpb.europa.eu/our-work-tools/our-documents/guidelines/guidelines-12020-guidelines-data-protection-impact_en",
+    "confidence": "high"
+  }
+]

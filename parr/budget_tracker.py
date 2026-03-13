@@ -29,10 +29,18 @@ logger = logging.getLogger(__name__)
 class BudgetExceededException(Exception):
     """Raised when an agent or workflow exceeds its budget."""
 
-    def __init__(self, message: str, agent_id: str = "", workflow_id: str = ""):
+    def __init__(
+        self,
+        message: str,
+        agent_id: str = "",
+        workflow_id: str = "",
+        limit_type: str = "unknown",
+    ):
         super().__init__(message)
         self.agent_id = agent_id
         self.workflow_id = workflow_id
+        self.limit_type = limit_type  # "tokens", "cost", "duration", or "unknown"
+        self.partial_phase_result = None  # Attached by PhaseRunner when available
 
 
 class BudgetTracker:
@@ -205,10 +213,15 @@ class BudgetTracker:
                 max_sub_agents_total=parent_node.budget.max_sub_agents_total,
             )
 
+        # Reserve a portion of remaining budget for parent recovery
+        recovery_pct = parent_node.budget.parent_recovery_budget_pct
+        allocatable_fraction = 1.0 - recovery_pct
+
         remaining_tokens = None
         if parent_node.budget.max_tokens:
             remaining = parent_node.budget.max_tokens - parent_node.budget_consumed.tokens
-            remaining_tokens = max(0, int(remaining * parent_node.budget.child_budget_fraction))
+            allocatable = remaining * allocatable_fraction
+            remaining_tokens = max(0, int(allocatable * parent_node.budget.child_budget_fraction))
             if remaining_tokens == 0:
                 logger.warning(
                     f"Child budget for agent {parent_node.agent_id} has 0 "
@@ -219,7 +232,8 @@ class BudgetTracker:
         remaining_cost = None
         if parent_node.budget.max_cost:
             remaining = parent_node.budget.max_cost - parent_node.budget_consumed.cost
-            remaining_cost = max(0.0, remaining * parent_node.budget.child_budget_fraction)
+            allocatable = remaining * allocatable_fraction
+            remaining_cost = max(0.0, allocatable * parent_node.budget.child_budget_fraction)
             if remaining_cost == 0.0:
                 logger.warning(
                     f"Child budget for agent {parent_node.agent_id} has $0 "
@@ -252,6 +266,7 @@ class BudgetTracker:
                 f"{consumed.tokens} >= {budget.max_tokens}",
                 agent_id=agent_id,
                 workflow_id=workflow_id,
+                limit_type="tokens",
             )
 
         if budget.max_cost and consumed.cost >= budget.max_cost:
@@ -260,6 +275,7 @@ class BudgetTracker:
                 f"${consumed.cost:.4f} >= ${budget.max_cost:.2f}",
                 agent_id=agent_id,
                 workflow_id=workflow_id,
+                limit_type="cost",
             )
 
         if budget.max_duration_ms:
@@ -270,4 +286,5 @@ class BudgetTracker:
                     f"{elapsed:.0f}ms >= {budget.max_duration_ms}ms",
                     agent_id=agent_id,
                     workflow_id=workflow_id,
+                    limit_type="duration",
                 )

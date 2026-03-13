@@ -1,0 +1,17 @@
+{
+  "summary": "AI in healthcare shows strong diagnostic potential but carries significant privacy and bias risks.",
+  "key_findings": [
+    {
+      "finding": "Deep learning achieves 94% sensitivity.",
+      "source": "WHO Report 2025"
+    },
+    {
+      "finding": "Patient data faces re-identification risks.",
+      "source": "EU Whitepaper 2025"
+    }
+  ],
+  "recommendations": [
+    "Mandate fairness audits",
+    "Implement differential privacy"
+  ]
+}

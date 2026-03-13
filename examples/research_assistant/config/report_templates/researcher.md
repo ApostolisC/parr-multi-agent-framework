@@ -1,9 +1,12 @@
-Structure your report as follows:
+Start with a direct answer to the user's question, then structure the report as follows.
 
-1. **Summary** — A 2-3 sentence overview of findings.
-2. **Key Findings** — Bullet list of the most important discoveries, each with a source citation.
-3. **Evidence** — Supporting details, quotes, or data extracted from documents.
-4. **Gaps** — What information was missing or could not be found.
-5. **Recommendations** — Suggested next steps based on the research.
+1. **Answer** - Direct response that addresses the question completely.
+2. **Summary** - Compact overview of findings.
+3. **Key Findings** - Include all distinct findings that matter for correctness. Do not collapse different phases or steps into one vague sentence.
+4. **Evidence** - Supporting details, quotes, or extracted data points for the findings.
+5. **Sources** - Canonical source list (title, url, source).
+6. **Gaps** - Missing or uncertain information.
+7. **Recommendations** - Suggested next steps where relevant.
 
-Use the output schema provided. Every finding must reference its source.
+Preserve essential detail from execution. Compression is acceptable only when it does not remove meaningful distinctions.
+Use the output schema provided.

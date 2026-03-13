@@ -1,0 +1,18 @@
+[
+  {
+    "task_id": "26bc9f92-972a-4764-ab69-e3ec353f5505",
+    "agent_id": "e08d355f-44b1-41d5-84d8-de442943137d",
+    "role": "researcher",
+    "sub_role": null,
+    "task_description": "Research the definition and purpose of DPIA (Data Protection Impact Assessment).",
+    "status": "failed"
+  },
+  {
+    "task_id": "4a5295af-2faf-4a15-8e9e-47a8986ed853",
+    "agent_id": "e55c43f7-3d74-4c15-9d2b-46675b087054",
+    "role": "researcher",
+    "sub_role": null,
+    "task_description": "Identify the key components of a DPIA process.",
+    "status": "spawned"
+  }
+]

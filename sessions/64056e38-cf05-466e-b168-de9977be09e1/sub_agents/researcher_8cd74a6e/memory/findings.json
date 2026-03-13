@@ -1,0 +1,38 @@
+[
+  {
+    "category": "methodology",
+    "content": "The EU AI Act mandates conformity assessments for high-risk AI systems, requiring risk management systems and transparency documentation throughout the AI lifecycle. This approach emphasizes human oversight and compliance with regulatory standards.",
+    "source": "EU AI Act Implementation Guide 2025",
+    "confidence": "high"
+  },
+  {
+    "category": "methodology",
+    "content": "AI systems in healthcare face significant privacy risks, including re-identification of anonymized data and unauthorized access. The GDPR restricts automated decision-making, highlighting the need for assessments that consider these privacy implications.",
+    "source": "EU Health Data Space Whitepaper 2025",
+    "confidence": "high"
+  },
+  {
+    "category": "methodology",
+    "content": "Fairness auditing is recommended for AI models, particularly in healthcare, to address biases that can lead to misdiagnosis. This methodology emphasizes the importance of evaluating AI systems for equitable outcomes before deployment.",
+    "source": "Lancet Digital Health, 2025",
+    "confidence": "high"
+  },
+  {
+    "category": "methodology",
+    "content": "Data Protection by Design and by Default (DPbDD) emphasizes integrating data protection measures into the development of products and services from the outset, ensuring compliance with GDPR principles throughout the lifecycle of data processing activities.",
+    "source": "GDPR Article 25, 2025",
+    "confidence": "high"
+  },
+  {
+    "category": "methodology",
+    "content": "Privacy Impact Assessments (PIAs) are a proactive approach to identifying and mitigating privacy risks associated with new projects or systems, focusing on how personal data is collected, used, and shared.",
+    "source": "ICO Guidance on PIAs, 2025",
+    "confidence": "high"
+  },
+  {
+    "category": "methodology",
+    "content": "The NIST Privacy Framework provides a structured approach for organizations to manage privacy risks, focusing on identifying, assessing, and mitigating privacy risks while promoting organizational accountability and transparency.",
+    "source": "NIST Privacy Framework, 2025",
+    "confidence": "high"
+  }
+]

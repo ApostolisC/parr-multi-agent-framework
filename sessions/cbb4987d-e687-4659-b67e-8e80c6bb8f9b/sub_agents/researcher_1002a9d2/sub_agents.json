@@ -1,0 +1,34 @@
+[
+  {
+    "task_id": "dc6ca685-f3d9-4f8f-a949-5a036e27d5cd",
+    "agent_id": "542d9db0-f6be-468f-8fb1-0a4fc20276f3",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Research and gather detailed information on the information gathering phase of web application pentesting, including techniques and tools used.",
+    "status": "failed"
+  },
+  {
+    "task_id": "580c7b1b-8f44-4a83-a8ab-f15ac0ef8384",
+    "agent_id": "8107aaea-daa6-4a64-83c7-855537410227",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Investigate the vulnerability scanning phase, focusing on common vulnerabilities, tools, and methodologies.",
+    "status": "failed"
+  },
+  {
+    "task_id": "e4d5b7bb-4b31-417e-93f4-77a68207023b",
+    "agent_id": "4fed393f-a34b-47bd-94bc-cb07a541d943",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Explore the exploitation phase, detailing techniques for exploiting vulnerabilities found in web applications.",
+    "status": "failed"
+  },
+  {
+    "task_id": "4508a9d9-2ed3-44d8-b2ea-727b2faebc04",
+    "agent_id": "180d3d30-c755-416c-9f9e-00615db18dc9",
+    "role": "researcher",
+    "sub_role": "deep_dive",
+    "task_description": "Compile information on the reporting phase, including best practices for documenting findings and recommendations for remediation.",
+    "status": "failed"
+  }
+]

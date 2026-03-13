@@ -1,0 +1,58 @@
+[
+  {
+    "index": 0,
+    "description": "Research and outline a penetration testing methodology for WiFi networks.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 1,
+    "description": "Research and outline a penetration testing methodology for web applications.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 2,
+    "description": "Identify common vulnerabilities and attack vectors in WiFi networks.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 3,
+    "description": "Identify common vulnerabilities and attack vectors in web applications.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 4,
+    "description": "Gather tools and techniques used in WiFi penetration testing.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 5,
+    "description": "Gather tools and techniques used in web application penetration testing.",
+    "priority": "medium",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 6,
+    "description": "Delegate research on WiFi penetration testing methodology to a sub-agent.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  },
+  {
+    "index": 7,
+    "description": "Delegate research on web application penetration testing methodology to a sub-agent.",
+    "priority": "high",
+    "completed": false,
+    "completion_summary": null
+  }
+]

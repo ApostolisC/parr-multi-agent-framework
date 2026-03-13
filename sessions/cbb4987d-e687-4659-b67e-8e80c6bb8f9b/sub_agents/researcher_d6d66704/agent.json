@@ -1,0 +1,11 @@
+{
+  "task_id": "d6d66704-b2ee-49a4-a63c-c5f2b3a293cb",
+  "agent_id": "3e6376c0-64b3-470d-99a4-18ca97357287",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Research and outline a pentest methodology for WiFi networks, including steps such as reconnaissance, scanning, exploitation, and reporting.",
+  "status": "failed",
+  "depth": 1,
+  "parent_task_id": "3d4bf3d2-2451-4b4f-8785-73214f8209c4",
+  "model": "gpt-4o-mini"
+}

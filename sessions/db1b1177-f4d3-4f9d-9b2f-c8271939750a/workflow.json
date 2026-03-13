@@ -1,0 +1,11 @@
+{
+  "workflow_id": "db1b1177-f4d3-4f9d-9b2f-c8271939750a",
+  "status": "completed",
+  "root_task_id": "809d9f0a-40c7-48b2-ada3-4b09faed11ab",
+  "budget": {
+    "max_tokens": 2000000,
+    "max_cost": 50.0,
+    "max_duration_ms": 600000
+  },
+  "created_at": "2026-03-13T09:46:46.094891+00:00"
+}

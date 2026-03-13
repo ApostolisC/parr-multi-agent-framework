@@ -1,0 +1,11 @@
+{
+  "task_id": "fa2c00ed-9d55-4d79-8412-97cdb640d561",
+  "agent_id": "2bd1826a-0db9-423f-aebb-374adcb32cdf",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Investigate the scanning phase for WiFi networks, focusing on tools and methods for identifying vulnerabilities.",
+  "status": "failed",
+  "depth": 2,
+  "parent_task_id": "d6d66704-b2ee-49a4-a63c-c5f2b3a293cb",
+  "model": "gpt-4o-mini"
+}

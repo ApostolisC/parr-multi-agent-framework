@@ -250,11 +250,28 @@ phase_limits:
   act: 15       # max LLM calls in Act phase
   review: 5     # max LLM calls in Review phase
   report: 5     # max LLM calls in Report phase
+
+llm_rate_limit:
+  enabled: true
+  max_concurrent_requests: 2
+  max_tokens_per_minute: 100000
+  max_requests_per_minute: 60   # alias for max_requests_per_window=60, window_seconds=60
+  max_queue_size: 100
+  acquire_timeout_seconds: 30
 ```
 
 ### Budget inheritance
 
 When an agent spawns a child, the child receives 50% of the parent's remaining token and cost budget. The depth limit decreases by 1. This prevents runaway cost from recursive spawning.
+
+### LLM queue and throttling
+
+`llm_rate_limit` adds a **central async FIFO queue** for all `chat_with_tools` calls in an orchestrator instance. Requests wait with `await` (non-blocking) until:
+
+- concurrent in-flight limit allows entry
+- rolling request-window limit allows entry
+
+Use this to smooth bursts and reduce provider 429s when many agents run at once.
 
 ### Per-workflow override
 

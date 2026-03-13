@@ -1,0 +1,22 @@
+{
+  "summary": "A Data Protection Impact Assessment (DPIA) consists of several structured phases designed to identify and mitigate data protection risks in projects involving personal data. The process ensures compliance with data protection regulations and helps organizations proactively address privacy concerns.",
+  "key_findings": [
+    {
+      "finding": "The typical phases of a DPIA are: 1) Identifying the need for a DPIA, 2) Describing the information flow, 3) Identifying and assessing data protection risks, 4) Identifying measures to mitigate risks, 5) Signing off and recording outcomes, and 6) Integrating outcomes into the project plan and reviewing as necessary.",
+      "source": "ICO (Information Commissioner's Office) - 'Data protection impact assessments (DPIAs)'"
+    },
+    {
+      "finding": "The DPIA process is iterative, requiring ongoing review and updates as the project develops or if new risks emerge.",
+      "source": "ICO - 'Data protection impact assessments (DPIAs)'"
+    },
+    {
+      "finding": "A DPIA is legally required under the GDPR for processing activities likely to result in high risks to individuals’ rights and freedoms.",
+      "source": "GDPR Article 35; ICO guidance"
+    }
+  ],
+  "gaps": [],
+  "recommendations": [
+    "Organizations should ensure that DPIAs are initiated early in project planning to maximize their effectiveness.",
+    "Regular reviews and updates of DPIAs are recommended to address new risks or changes in processing activities."
+  ]
+}

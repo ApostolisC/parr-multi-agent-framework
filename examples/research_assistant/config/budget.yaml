@@ -1,16 +1,30 @@
 # Budget for the research assistant example.
 
 budget_defaults:
-  max_tokens: 50000
-  max_cost: 1.0
-  max_duration_ms: 120000
-  max_agent_depth: 2
-  max_parallel_agents: 2
-  max_sub_agents_total: 3
+  max_tokens: 2000000
+  max_cost: 50.0
+  max_duration_ms: 600000       # 10 minutes
+  max_agent_depth: 5
+  max_parallel_agents: 5
+  max_sub_agents_total: 10
   inherit_remaining: true
+  parent_recovery_budget_pct: 0.10
 
 phase_limits:
-  plan: 5
-  act: 10
-  review: 3
-  report: 5
+  plan: 10
+  act: 30
+  review: 10
+  report: 10
+
+llm_rate_limit:
+  enabled: true
+  max_tokens_per_minute: 100000
+  max_requests_per_minute: 1500
+  max_queue_size: 200
+
+simple_query_bypass:
+  enabled: true
+  route_confidence_threshold: 0.80
+  force_full_workflow_if_output_schema: true
+  allow_escalation_to_full_workflow: true
+  direct_answer_max_tokens: 512

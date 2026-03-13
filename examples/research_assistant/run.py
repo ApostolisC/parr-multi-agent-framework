@@ -98,6 +98,29 @@ _CORPUS: List[Dict[str, Any]] = [
         ),
         "source": "EU AI Act Implementation Guide 2025",
     },
+    {
+        "id": "doc4:0",
+        "title": "DPIA Phases - ICO Guidance",
+        "content": (
+            "A standard Data Protection Impact Assessment (DPIA) process includes: "
+            "(1) identify whether a DPIA is needed, (2) describe the processing and data flows, "
+            "(3) consult stakeholders, (4) assess necessity and proportionality, "
+            "(5) identify privacy risks, (6) define mitigating controls, "
+            "(7) document decisions and sign-off, and (8) review outcomes after implementation."
+        ),
+        "source": "ICO Guide to UK GDPR DPIA",
+    },
+    {
+        "id": "doc4:1",
+        "title": "DPIA Method Steps - EDPB",
+        "content": (
+            "EDPB guidance describes a comparable DPIA flow: preliminary screening, "
+            "processing description and purpose analysis, risk assessment for data subjects, "
+            "selection of safeguards, decision on residual risk and consultation where required, "
+            "and periodic review."
+        ),
+        "source": "EDPB Guidelines on DPIA",
+    },
 ]
 
 
@@ -149,6 +172,34 @@ async def read_section(section_id: str) -> str:
     return json.dumps({"error": f"Section '{section_id}' not found."})
 
 
+async def read_multiple_sections(section_ids: List[str]) -> str:
+    """Read multiple document sections in one call. Deduplicates automatically."""
+    seen = set()
+    results = []
+    not_found = []
+    for sid in section_ids:
+        if sid in seen:
+            continue
+        seen.add(sid)
+        found = False
+        for doc in _CORPUS:
+            if doc["id"] == sid:
+                results.append({
+                    "section_id": doc["id"],
+                    "title": doc["title"],
+                    "full_text": doc["content"],
+                    "source": doc["source"],
+                })
+                found = True
+                break
+        if not found:
+            not_found.append(sid)
+    response: Dict[str, Any] = {"sections": results}
+    if not_found:
+        response["not_found"] = not_found
+    return json.dumps(response)
+
+
 # Build ToolDef objects for the domain tools
 SEARCH_TOOL = ToolDef(
     name="search_documents",
@@ -185,6 +236,27 @@ READ_TOOL = ToolDef(
         "required": ["section_id"],
     },
     handler=read_section,
+    phase_availability=[Phase.ACT],
+)
+
+READ_MULTI_TOOL = ToolDef(
+    name="read_multiple_sections",
+    description=(
+        "Read multiple document sections in one call. More efficient than "
+        "calling read_section repeatedly. Deduplicates IDs automatically."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "section_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "List of section IDs returned by search_documents.",
+            },
+        },
+        "required": ["section_ids"],
+    },
+    handler=read_multiple_sections,
     phase_availability=[Phase.ACT],
 )
 
@@ -323,6 +395,7 @@ async def run(
             tool_registry={
                 "search_documents": SEARCH_TOOL,
                 "read_section": READ_TOOL,
+                "read_multiple_sections": READ_MULTI_TOOL,
             },
             event_sink=LoggingEventSink(),
             provider_override=provider,
@@ -337,6 +410,7 @@ async def run(
             tool_registry={
                 "search_documents": SEARCH_TOOL,
                 "read_section": READ_TOOL,
+                "read_multiple_sections": READ_MULTI_TOOL,
             },
             llm=llm,
             event_sink=LoggingEventSink(),

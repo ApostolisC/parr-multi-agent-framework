@@ -1,0 +1,32 @@
+[
+  {
+    "category": "data_point",
+    "content": "The General Data Protection Regulation (GDPR) requires a Data Protection Impact Assessment (DPIA) when processing is likely to result in a high risk to the rights and freedoms of natural persons.",
+    "source": "GDPR Article 35",
+    "confidence": "high"
+  },
+  {
+    "category": "data_point",
+    "content": "A DPIA must include a systematic description of the intended processing operations, the purposes of the processing, and an assessment of the necessity and proportionality of the processing.",
+    "source": "GDPR Article 35",
+    "confidence": "high"
+  },
+  {
+    "category": "data_point",
+    "content": "The GDPR mandates that organizations consult the relevant supervisory authority prior to processing if the DPIA indicates that the processing would result in a high risk in the absence of measures taken to mitigate the risk.",
+    "source": "GDPR Article 36",
+    "confidence": "high"
+  },
+  {
+    "category": "data_point",
+    "content": "Organizations must ensure that the DPIA is conducted prior to the processing of personal data and must document the assessment.",
+    "source": "GDPR Recital 84",
+    "confidence": "high"
+  },
+  {
+    "category": "data_point",
+    "content": "The GDPR specifies that the DPIA should be reviewed regularly, especially when there are changes in the processing operations or technology used.",
+    "source": "GDPR Article 35",
+    "confidence": "high"
+  }
+]

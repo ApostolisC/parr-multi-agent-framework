@@ -1,0 +1,11 @@
+{
+  "task_id": "92481583-c1e6-42b3-85d6-fe58de93b51b",
+  "agent_id": "378addd0-93d2-48ba-ac67-5189f42279c5",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "please explain to me vulnerability assessment in 2 paragraphs",
+  "status": "completed",
+  "depth": 0,
+  "parent_task_id": null,
+  "model": "gpt-4.1"
+}

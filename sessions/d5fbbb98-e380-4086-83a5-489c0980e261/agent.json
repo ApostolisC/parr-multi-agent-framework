@@ -1,0 +1,11 @@
+{
+  "task_id": "d66e9266-9f2a-4645-aafd-c529187a7d1f",
+  "agent_id": "fad99c5b-f813-4922-8c02-4c4963dbec5f",
+  "role": "researcher",
+  "sub_role": null,
+  "task": "can you explain what is dpia? Use only one agent",
+  "status": "completed",
+  "depth": 0,
+  "parent_task_id": null,
+  "model": "gpt-4o-mini"
+}

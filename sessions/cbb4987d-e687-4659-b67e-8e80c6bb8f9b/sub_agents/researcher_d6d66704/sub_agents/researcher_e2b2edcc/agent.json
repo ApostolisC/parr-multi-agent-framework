@@ -1,0 +1,11 @@
+{
+  "task_id": "e2b2edcc-b022-4aca-b371-bff93f24c337",
+  "agent_id": "9999f3a1-ab87-4999-ac8a-b2871da321be",
+  "role": "researcher",
+  "sub_role": "deep_dive",
+  "task": "Examine the reporting phase, outlining how to document findings and create a comprehensive report.",
+  "status": "failed",
+  "depth": 2,
+  "parent_task_id": "d6d66704-b2ee-49a4-a63c-c5f2b3a293cb",
+  "model": "gpt-4o-mini"
+}

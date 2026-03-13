@@ -160,6 +160,9 @@ class PhaseRunner:
         self._phase_limits = phase_limits or DEFAULT_PHASE_LIMITS
         self._stream = stream
         self._stall = stall_config or StallDetectionConfig()
+        # Tracks the in-progress phase result so it can be recovered
+        # when BudgetExceededException interrupts a phase mid-execution.
+        self._in_progress_result: Optional[PhaseResult] = None
 
     async def run(
         self,
@@ -220,6 +223,7 @@ class PhaseRunner:
         ))
 
         result = PhaseResult(phase=phase)
+        self._in_progress_result = result
         iteration = 0
         _consecutive_stall_iterations = 0
         _consecutive_fw_only_iterations = 0
@@ -391,6 +395,10 @@ class PhaseRunner:
 
                 # Execute each tool call and check for non-framework work
                 has_non_framework_calls = False
+                # Collect circuit-breaker messages to append AFTER all tool
+                # results — inserting USER messages between TOOL messages
+                # violates the OpenAI API invariant.
+                _deferred_cb_messages: List[Message] = []
                 for tool_call in response.tool_calls:
                     # Check cancellation between individual tool calls
                     if node.status == AgentStatus.CANCELLED:
@@ -414,6 +422,9 @@ class PhaseRunner:
                     # Track tool call
                     result.tool_calls_made.append({
                         "name": tool_call.name,
+                        "phase": phase.value,
+                        "arguments": tool_call.arguments,
+                        "result_content": tool_result.content,
                         "success": tool_result.success,
                         "error": tool_result.error,
                     })
@@ -430,7 +441,7 @@ class PhaseRunner:
                         if (count == self._stall.max_consecutive_tool_failures - 1
                                 and tool_call.name not in _circuit_breaker_warnings):
                             _circuit_breaker_warnings.add(tool_call.name)
-                            messages.append(Message(
+                            _deferred_cb_messages.append(Message(
                                 role=MessageRole.USER,
                                 content=(
                                     f"[TOOL WARNING] Tool '{tool_call.name}' has "
@@ -446,7 +457,7 @@ class PhaseRunner:
                                 f"after {count} consecutive failures in "
                                 f"{phase.value} for agent {node.agent_id}"
                             )
-                            messages.append(Message(
+                            _deferred_cb_messages.append(Message(
                                 role=MessageRole.USER,
                                 content=(
                                     f"[TOOL DISABLED] Tool '{tool_call.name}' has "
@@ -463,6 +474,10 @@ class PhaseRunner:
                         _domain_tool_calls += 1
                     else:
                         _framework_tool_calls += 1
+
+                # Append deferred circuit-breaker messages after all tool
+                # results, so we don't break the assistant→tool pairing.
+                messages.extend(_deferred_cb_messages)
 
                 # Always count every LLM-call iteration toward the phase limit.
                 # Phase limits are hard caps that must be respected regardless

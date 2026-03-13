@@ -1,0 +1,22 @@
+[
+  {
+    "criterion": "Does the collected data/analysis address the original task fully?",
+    "rating": "fail",
+    "justification": "No findings were recorded for any phase of WiFi penetration testing, indicating that the research did not yield any relevant information."
+  },
+  {
+    "criterion": "Are there gaps, contradictions, or areas where quality is insufficient?",
+    "rating": "fail",
+    "justification": "There are significant gaps as no techniques or tools were found for any of the phases, which is critical to the task."
+  },
+  {
+    "criterion": "Were any tools or sub-agents that failed critical to the task?",
+    "rating": "pass",
+    "justification": "The tools used did not fail; however, they did not yield any relevant findings."
+  },
+  {
+    "criterion": "Is the quality of findings sufficient for reporting?",
+    "rating": "fail",
+    "justification": "The quality is insufficient as there are no findings to report on."
+  }
+]

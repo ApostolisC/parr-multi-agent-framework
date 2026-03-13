@@ -3,7 +3,7 @@
 
 roles:
   researcher:
-    model: gpt-4o-mini
+    model: gpt-4.1
     description: "Researches a topic by searching documents and synthesizing findings."
     system_prompt: system_prompts/researcher.md
     report_template: report_templates/researcher.md

@@ -1,0 +1,18 @@
+[
+  {
+    "task_id": "61d1767e-e5b1-4a9c-9852-5b0e664a0c59",
+    "agent_id": "e843d709-6568-489f-87f1-8f2880aa1035",
+    "role": "researcher",
+    "sub_role": null,
+    "task_description": "Research the concept of Data Protection Impact Assessment (DPIA) and its significance in data protection law.",
+    "status": "failed"
+  },
+  {
+    "task_id": "e4de7099-6fab-4978-8031-dc24a98b7b3c",
+    "agent_id": "c42060c1-22ce-45da-a414-edac92ca7391",
+    "role": "researcher",
+    "sub_role": null,
+    "task_description": "Identify the legal requirements for conducting a DPIA under the GDPR.",
+    "status": "failed"
+  }
+]

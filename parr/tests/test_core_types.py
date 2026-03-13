@@ -421,11 +421,15 @@ class TestAgentOutput:
         meta = ExecutionMetadata(
             phases_completed=["plan", "act"],
             total_duration_ms=1234.5,
+            execution_path="direct_answer",
+            routing_decision={"selected_path": "direct_answer"},
         )
         out = self._make_output(execution_metadata=meta)
         em = out.to_dict()["execution_metadata"]
         assert em["phases_completed"] == ["plan", "act"]
         assert em["total_duration_ms"] == 1234.5
+        assert em["execution_path"] == "direct_answer"
+        assert em["routing_decision"] == {"selected_path": "direct_answer"}
 
     def test_defaults(self):
         out = AgentOutput(task_id="t", agent_id="a", role="r")

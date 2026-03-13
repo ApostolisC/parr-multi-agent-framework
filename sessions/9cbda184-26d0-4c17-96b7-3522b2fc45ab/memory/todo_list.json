@@ -1,0 +1,23 @@
+[
+  {
+    "index": 0,
+    "description": "Conduct an initial broad search to identify the standard phases of a Data Protection Impact Assessment (DPIA).",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Conducted initial broad searches for DPIA phases. Results did not yield direct, authoritative descriptions of DPIA phases; identified a gap in available document corpus."
+  },
+  {
+    "index": 1,
+    "description": "Extract and summarize the key phases of a DPIA from authoritative sources (e.g., GDPR guidelines, regulatory bodies, reputable privacy organizations).",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Extracted and summarized available information. No explicit DPIA phase descriptions found in the corpus; noted gap and lack of authoritative guidance."
+  },
+  {
+    "index": 2,
+    "description": "Cite sources for each identified phase and provide brief explanations for each phase.",
+    "priority": "high",
+    "completed": true,
+    "completion_summary": "Cited gap findings for each phase; no direct DPIA phase explanations available in the corpus. Provided explanations regarding the lack of source material."
+  }
+]
