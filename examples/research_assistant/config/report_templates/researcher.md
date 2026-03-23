@@ -1,7 +1,7 @@
 Start with a direct answer to the user's question, then structure the report as follows.
 
-1. **Answer** - Direct response that addresses the question completely.
-2. **Summary** - Compact overview of findings.
+1. **Summary** - Compact overview of findings.
+2. **Answer** - Direct response that addresses the question completely.
 3. **Key Findings** - Include all distinct findings that matter for correctness. Do not collapse different phases or steps into one vague sentence.
 4. **Evidence** - Supporting details, quotes, or extracted data points for the findings.
 5. **Sources** - Canonical source list (title, url, source).
@@ -10,3 +10,4 @@ Start with a direct answer to the user's question, then structure the report as 
 
 Preserve essential detail from execution. Compression is acceptable only when it does not remove meaningful distinctions.
 Use the output schema provided.
+avoid numbering and bullets unless needed.

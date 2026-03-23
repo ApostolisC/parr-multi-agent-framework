@@ -20,33 +20,46 @@ Quick Start:
 
 # Core types
 from .core_types import (
+    AdaptiveFlowConfig,
     AgentConfig,
     AgentInput,
+    AgentMessage,
     AgentNode,
     AgentOutput,
+    AgentOutputStatus,
     AgentStatus,
     BudgetConfig,
     BudgetUsage,
     Confidence,
     CostConfig,
+    DirectAnswerSchemaPolicy,
     ErrorEntry,
+    ToolAccessLevel,
     ErrorSource,
     ExecutionMetadata,
+    ExecutionPath,
     LLMRateLimitConfig,
     LLMResponse,
     Message,
     MessageRole,
+    MessageType,
     ModelConfig,
     ModelPricing,
+    OutputValidationResult,
     Phase,
+    PhaseConfig,
     PlanContext,
+    PlanContextStatus,
+    PlanContextType,
     PlanStep,
     PlanStepStatus,
     SimpleQueryBypassConfig,
     StallDetectionConfig,
     TokenUsage,
     ToolCall,
+    ToolContext,
     ToolDef,
+    ToolMiddleware,
     ToolResult,
     TraceEntry,
     WorkflowExecution,
@@ -74,7 +87,14 @@ from .event_bus import EventBus, EventBridge, InMemoryEventSink
 from .event_types import FrameworkEvent
 
 # Budget
-from .budget_tracker import BudgetExceededException, BudgetTracker
+from .budget_tracker import (
+    BudgetExceededException,
+    BudgetTracker,
+    ChildBudgetAllocator,
+    EqualShareAllocator,
+    FixedAllocator,
+    FractionAllocator,
+)
 
 # Trace
 from .trace_store import TraceStore
@@ -92,8 +112,22 @@ from .framework_tools import AgentWorkingMemory
 # Phase runner (for advanced usage)
 from .phase_runner import CancelledException, PhaseRunner, PhaseResult
 
-# Context manager
+# Stall detection
+from .stall_detector import StallDetector, StallVerdict
+
+# Output validation
+from .output_validator import (
+    CompositeValidator,
+    JsonSchemaValidator,
+    OutputValidator,
+)
+
+# Agent coordination
+from .agent_coordinator import AgentCoordinator
+
+# Context manager & compaction
 from .context_manager import ContextManager
+from .compaction_strategy import CompactionStrategy
 
 # Reference adapters
 from .adapters import (
@@ -123,31 +157,42 @@ __all__ = [
     # Types
     "AgentConfig",
     "AgentInput",
+    "AgentMessage",
     "AgentNode",
     "AgentOutput",
+    "AgentOutputStatus",
     "AgentStatus",
     "BudgetConfig",
     "BudgetUsage",
     "Confidence",
     "CostConfig",
+    "DirectAnswerSchemaPolicy",
     "ErrorEntry",
     "ErrorSource",
     "ExecutionMetadata",
+    "ExecutionPath",
     "LLMRateLimitConfig",
     "LLMResponse",
     "Message",
     "MessageRole",
+    "MessageType",
     "ModelConfig",
     "ModelPricing",
+    "OutputValidationResult",
     "Phase",
+    "PhaseConfig",
     "PlanContext",
+    "PlanContextStatus",
+    "PlanContextType",
     "PlanStep",
     "PlanStepStatus",
     "SimpleQueryBypassConfig",
     "StallDetectionConfig",
     "TokenUsage",
     "ToolCall",
+    "ToolContext",
     "ToolDef",
+    "ToolMiddleware",
     "ToolResult",
     "TraceEntry",
     "WorkflowExecution",
@@ -173,6 +218,10 @@ __all__ = [
     # Budget
     "BudgetExceededException",
     "BudgetTracker",
+    "ChildBudgetAllocator",
+    "EqualShareAllocator",
+    "FixedAllocator",
+    "FractionAllocator",
     # Trace
     "TraceStore",
     # Persistence
@@ -182,8 +231,18 @@ __all__ = [
     "ToolRegistry",
     "ToolExecutor",
     "AgentWorkingMemory",
+    # Stall detection
+    "StallDetector",
+    "StallVerdict",
+    # Output validation
+    "OutputValidator",
+    "JsonSchemaValidator",
+    "CompositeValidator",
+    # Agent coordination
+    "AgentCoordinator",
     # Context
     "ContextManager",
+    "CompactionStrategy",
     # Adapters
     "OpenAIToolCallingLLM",
     "AnthropicToolCallingLLM",

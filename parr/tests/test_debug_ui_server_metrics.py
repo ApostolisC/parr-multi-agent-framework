@@ -1,6 +1,6 @@
 """Tests for debug UI metric derivation helpers."""
 
-from parr.debug_ui.server import _aggregate_metrics, _compute_agent_metrics
+from parr.debug_ui.data_source import _aggregate_metrics, _compute_agent_metrics
 
 
 def test_compute_agent_metrics_prefers_final_token_usage():

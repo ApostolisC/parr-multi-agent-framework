@@ -22,7 +22,13 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 from .agent_runtime import AgentRuntime
-from .budget_tracker import BudgetExceededException, BudgetTracker
+from .budget_tracker import (
+    BudgetExceededException,
+    BudgetTracker,
+    ChildBudgetAllocator,
+)
+from .agent_coordinator import AgentCoordinator
+from .output_validator import OutputValidator
 from .event_bus import EventBus, EventBridge, InMemoryEventSink
 from .event_types import (
     agent_cancelled,
@@ -35,8 +41,10 @@ from .event_types import (
 from .persistence import AgentFileStore, WorkflowFileStore
 from .trace_store import TraceStore
 from .core_types import (
+    AdaptiveFlowConfig,
     AgentConfig,
     AgentInput,
+    AgentMessage,
     AgentNode,
     AgentOutput,
     AgentStatus,
@@ -47,6 +55,7 @@ from .core_types import (
     ErrorSource,
     ExecutionMetadata,
     Phase,
+    PhaseConfig,
     SimpleQueryBypassConfig,
     StallDetectionConfig,
     ToolCall,
@@ -62,6 +71,30 @@ from .core_types import (
 from .protocols import DomainAdapter, EventSink, ToolCallingLLM
 
 logger = logging.getLogger(__name__)
+
+
+def _classify_child_failure(exc: Exception) -> str:
+    """Classify a child agent exception into a human-readable failure type."""
+    exc_type = type(exc).__name__
+    exc_str = str(exc).lower()
+
+    if isinstance(exc, BudgetExceededException):
+        return "budget_exhausted"
+    if isinstance(exc, asyncio.TimeoutError):
+        return "timeout"
+    if "timeout" in exc_str:
+        return "timeout"
+    if "rate" in exc_str and "limit" in exc_str:
+        return "rate_limit"
+    if "429" in exc_str:
+        return "rate_limit"
+    if "content_filter" in exc_type.lower() or "content filter" in exc_str:
+        return "content_filter"
+    if "cancel" in exc_str or isinstance(exc, asyncio.CancelledError):
+        return "cancelled"
+    if "connection" in exc_str or "network" in exc_str:
+        return "connection_error"
+    return "execution_error"
 
 
 class Orchestrator:
@@ -92,18 +125,27 @@ class Orchestrator:
         simple_query_bypass: Optional[SimpleQueryBypassConfig] = None,
         wait_for_agents_timeout: Optional[float] = None,
         persist_dir: Optional[str] = None,
+        phase_config: Optional[PhaseConfig] = None,
+        child_allocator: Optional[ChildBudgetAllocator] = None,
+        output_validator: Optional[OutputValidator] = None,
+        coordinator: Optional[AgentCoordinator] = None,
+        adaptive_config: Optional[AdaptiveFlowConfig] = None,
     ) -> None:
         self._llm = llm
         self._domain_adapter = domain_adapter
         self._cost_config = cost_config
+        self._output_validator = output_validator
+        self._coordinator = coordinator or AgentCoordinator()
         self._max_review_cycles = max_review_cycles
         self._phase_limits = phase_limits
+        self._phase_config = phase_config
         self._default_budget = default_budget or BudgetConfig()
         self._stream = stream
         self._stall_config = stall_config
         self._simple_query_bypass = simple_query_bypass or SimpleQueryBypassConfig()
         self._wait_for_agents_timeout = wait_for_agents_timeout
         self._persist_dir = persist_dir
+        self._adaptive_config = adaptive_config
 
         # Internal event bus
         self._event_bus = EventBus()
@@ -113,13 +155,15 @@ class Orchestrator:
         self._event_bridge = EventBridge(self._event_bus, self._event_sink)
 
         # Budget tracker
-        self._budget_tracker = BudgetTracker(cost_config)
+        self._budget_tracker = BudgetTracker(cost_config, child_allocator=child_allocator)
 
         # Active workflows
         self._workflows: Dict[str, WorkflowExecution] = {}
         self._trace_stores: Dict[str, TraceStore] = {}
         # Background child agent tasks: {task_id: asyncio.Task}
         self._pending_tasks: Dict[str, asyncio.Task] = {}
+        # Message read cursors: {task_id: last_read_index}
+        self._message_cursors: Dict[str, int] = {}
 
     # -----------------------------------------------------------------------
     # Public API
@@ -184,6 +228,11 @@ class Orchestrator:
         # Resolve output schema from adapter if not provided
         if output_schema is None and self._domain_adapter:
             output_schema = self._domain_adapter.get_output_schema(role, sub_role)
+
+        # Resolve direct-answer schema policy from adapter
+        direct_answer_schema_policy = None
+        if self._domain_adapter and hasattr(self._domain_adapter, 'get_direct_answer_schema_policy'):
+            direct_answer_schema_policy = self._domain_adapter.get_direct_answer_schema_policy(role, sub_role)
 
         # Create workflow
         workflow = WorkflowExecution(
@@ -280,6 +329,7 @@ class Orchestrator:
                 additional_context=additional_context,
                 budget=workflow_budget,
                 trace_snapshot=trace_store.get_snapshot(root_node.task_id),
+                direct_answer_schema_policy=direct_answer_schema_policy,
             )
 
             # Build report template handler from adapter
@@ -299,6 +349,9 @@ class Orchestrator:
                 simple_query_bypass=self._simple_query_bypass,
                 budget_config=workflow_budget,
                 agent_file_store=root_store,
+                phase_config=self._phase_config,
+                output_validator=self._output_validator,
+                adaptive_config=self._adaptive_config,
             )
 
             # Execute with orchestrator tool handling
@@ -335,6 +388,13 @@ class Orchestrator:
                     wf_store.update_workflow_status(workflow.status.value)
                 except Exception as e:
                     logger.error(f"Failed to persist workflow status: {e}")
+                    output.errors.append(ErrorEntry(
+                        source=ErrorSource.SYSTEM,
+                        name="orchestrator",
+                        error_type="persist_status_failed",
+                        message=f"Failed to persist workflow status: {e}",
+                        recoverable=True,
+                    ))
 
             # Persist output if adapter is available
             if self._domain_adapter and output.status in _SUCCESS_STATUSES:
@@ -342,6 +402,13 @@ class Orchestrator:
                     self._domain_adapter.persist_output(workflow.workflow_id, output)
                 except Exception as e:
                     logger.error(f"Failed to persist workflow output: {e}")
+                    output.errors.append(ErrorEntry(
+                        source=ErrorSource.SYSTEM,
+                        name="orchestrator",
+                        error_type="persist_output_failed",
+                        message=f"Failed to persist workflow output: {e}",
+                        recoverable=True,
+                    ))
 
             return output
 
@@ -424,6 +491,10 @@ class Orchestrator:
             "wait_for_agents": self._handle_wait_for_agents,
             "get_agent_result": self._handle_get_agent_result,
             "get_agent_results_all": self._handle_get_agent_results_all,
+            "send_message": self._handle_send_message,
+            "read_messages": self._handle_read_messages,
+            "set_shared_state": self._handle_set_shared_state,
+            "get_shared_state": self._handle_get_shared_state,
         }
 
         handler = handlers.get(tool_call.name)
@@ -556,6 +627,11 @@ class Orchestrator:
         if self._domain_adapter:
             child_schema = self._domain_adapter.get_output_schema(role, sub_role)
 
+        # Resolve child direct-answer schema policy
+        child_da_policy = None
+        if self._domain_adapter and hasattr(self._domain_adapter, 'get_direct_answer_schema_policy'):
+            child_da_policy = self._domain_adapter.get_direct_answer_schema_policy(role, sub_role)
+
         # Create child node
         child_node = AgentNode(
             task_id=generate_id(),
@@ -588,6 +664,7 @@ class Orchestrator:
             additional_context=args.get("additional_context"),
             budget=child_budget,
             trace_snapshot=trace_store.get_snapshot(child_node.task_id),
+            direct_answer_schema_policy=child_da_policy,
         )
 
         # Sub-agents get limited review cycles to avoid costly retry loops.
@@ -630,6 +707,20 @@ class Orchestrator:
             except Exception as e:
                 logger.error(f"Failed to persist child agent info: {e}", exc_info=True)
 
+        # Inherit phase config for child, adjusting review cycles
+        child_phase_config = None
+        if self._phase_config is not None:
+            child_phase_config = PhaseConfig(
+                phases=self._phase_config.phases,
+                phase_limits=self._phase_config.phase_limits,
+                phase_prompts=self._phase_config.phase_prompts,
+                max_review_cycles=min(
+                    child_review_cycles, self._phase_config.max_review_cycles,
+                ),
+                review_phase=self._phase_config.review_phase,
+                review_retry_phase=self._phase_config.review_retry_phase,
+            )
+
         child_runtime = AgentRuntime(
             llm=self._llm,
             budget_tracker=self._budget_tracker,
@@ -643,6 +734,9 @@ class Orchestrator:
             simple_query_bypass=self._simple_query_bypass,
             budget_config=child_budget,
             agent_file_store=child_file_store,
+            phase_config=child_phase_config,
+            output_validator=self._output_validator,
+            adaptive_config=self._adaptive_config,
         )
 
         # Launch child execution as a background task so the parent can
@@ -682,6 +776,33 @@ class Orchestrator:
                     f"Child agent {child_node.agent_id} failed: {e}",
                     exc_info=True,
                 )
+                # Classify the failure for the parent agent
+                failure_type = _classify_child_failure(e)
+                # Build a minimal AgentOutput so parent gets structured info
+                failed_output = AgentOutput(
+                    task_id=child_node.task_id,
+                    agent_id=child_config.agent_id,
+                    role=child_config.role,
+                    sub_role=child_config.sub_role,
+                    status="failed",
+                    summary=f"Agent failed: {failure_type} — {str(e)[:200]}",
+                    findings={},
+                    errors=[ErrorEntry(
+                        source=ErrorSource.SYSTEM,
+                        name="child_agent",
+                        error_type=failure_type,
+                        message=str(e)[:500],
+                        recoverable=failure_type in (
+                            "timeout", "rate_limit", "budget_exhausted",
+                        ),
+                    )],
+                    token_usage=TokenUsage(),
+                    execution_metadata=ExecutionMetadata(
+                        execution_path="adaptive",
+                    ),
+                )
+                child_node.status = AgentStatus.FAILED
+                child_node.result = failed_output
                 trace_store.update_status(
                     child_node.task_id,
                     AgentStatus.FAILED,
@@ -696,7 +817,7 @@ class Orchestrator:
                             )
                     except Exception:
                         pass
-                raise
+                return failed_output
 
         task = asyncio.create_task(
             _run_child(),
@@ -796,21 +917,38 @@ class Orchestrator:
             )
 
         # Check for failed/degraded children and inject recovery guidance
-        failed_ids = [
-            tid for tid, r in results.items()
+        failed_entries = [
+            (tid, r) for tid, r in results.items()
             if r.get("status") in ("failed", "degraded", "cancelled")
         ]
         content = json.dumps(results, indent=2, default=str)
-        if failed_ids:
+        if failed_entries:
             recovery_pct = parent_node.budget.parent_recovery_budget_pct
+            failure_details = []
+            for tid, r in failed_entries:
+                ftype = r.get("failure_type", "unknown")
+                role = r.get("role", "unknown")
+                err_msg = ""
+                if r.get("errors"):
+                    for e in r["errors"]:
+                        if isinstance(e, dict) and e.get("message"):
+                            err_msg = e["message"][:100]
+                            break
+                failure_details.append(
+                    f"  - {tid[:8]} (role: {role}): {ftype}"
+                    + (f" — {err_msg}" if err_msg else "")
+                )
             content += (
-                f"\n\n[RECOVERY NOTICE] {len(failed_ids)} sub-agent(s) "
-                f"failed or returned degraded results: {failed_ids}. "
-                f"Approximately {recovery_pct:.0%} of the original budget "
-                f"was reserved for recovery. You may: (1) synthesize a "
-                f"response from partial/degraded results, (2) attempt the "
-                f"remaining work yourself, or (3) spawn a replacement agent "
-                f"with a narrower scope."
+                f"\n\n[RECOVERY NOTICE] {len(failed_entries)} sub-agent(s) "
+                f"failed or returned degraded results:\n"
+                + "\n".join(failure_details)
+                + f"\n\nRecovery budget: ~{recovery_pct:.0%} of original reserved.\n"
+                f"IMPORTANT: Analyze each failure and decide your next action. "
+                f"State your reasoning clearly. Options:\n"
+                f"(1) Synthesize from partial/successful results if coverage is adequate\n"
+                f"(2) Respawn a replacement agent with narrower scope or different approach\n"
+                f"(3) Perform the failed task yourself using your own tools\n"
+                f"Explain which option you chose and why."
             )
 
         return ToolResult(
@@ -830,18 +968,22 @@ class Orchestrator:
                     "task_id": task_id,
                     "status": "cancelled",
                     "error": "Agent task was cancelled.",
+                    "failure_type": "cancelled",
                 }
-            exc = pending.exception()
-            if exc is not None:
-                return {
-                    "task_id": task_id,
-                    "status": "failed",
-                    "error": str(exc)[:500],
-                }
+            # Even if there was an exception, _run_child now stores
+            # a failed AgentOutput on the node, so fall through to
+            # the child.result check below.
 
         child = workflow.agent_tree.get(task_id)
         if child and child.result:
-            return child.result.to_dict()
+            result_dict = child.result.to_dict()
+            # Enrich with failure_type from errors if failed
+            if child.result.status == "failed" and child.result.errors:
+                for err in child.result.errors:
+                    if hasattr(err, "error_type"):
+                        result_dict["failure_type"] = err.error_type
+                        break
+            return result_dict
         if child:
             return {
                 "task_id": task_id,
@@ -934,19 +1076,226 @@ class Orchestrator:
         )
 
     # -----------------------------------------------------------------------
+    # Coordination handlers (message passing + shared state)
+    # -----------------------------------------------------------------------
+
+    async def _handle_send_message(
+        self,
+        tool_call: ToolCall,
+        parent_node: AgentNode,
+        workflow: WorkflowExecution,
+        trace_store: TraceStore,
+        roles_description: str,
+        wf_store: Optional[WorkflowFileStore] = None,
+    ) -> ToolResult:
+        """Handle send_message tool call."""
+        args = tool_call.arguments
+        to_task_id = args.get("to_task_id", "")
+        content = args.get("content", "")
+        message_type = args.get("message_type", "info")
+        data = args.get("data") or {}
+
+        if not to_task_id:
+            return ToolResult(
+                tool_call_id=tool_call.id, success=False, content="",
+                error="send_message requires a non-empty 'to_task_id'.",
+            )
+        if not content:
+            return ToolResult(
+                tool_call_id=tool_call.id, success=False, content="",
+                error="send_message requires a non-empty 'content'.",
+            )
+
+        # Check recipient exists
+        if to_task_id not in workflow.agent_tree:
+            return ToolResult(
+                tool_call_id=tool_call.id, success=False, content="",
+                error=f"No agent found with task_id '{to_task_id}'.",
+            )
+
+        # Permission check
+        if not self._coordinator.can_send_message(
+            parent_node.task_id, to_task_id, workflow,
+        ):
+            return ToolResult(
+                tool_call_id=tool_call.id, success=False, content="",
+                error=(
+                    f"Cannot send message to agent '{to_task_id}'. "
+                    f"Messages are only allowed between parent/child and sibling agents."
+                ),
+            )
+
+        message = self._coordinator.send_message(
+            from_task_id=parent_node.task_id,
+            to_task_id=to_task_id,
+            content=content,
+            message_type=message_type,
+            data=data,
+        )
+
+        return ToolResult(
+            tool_call_id=tool_call.id,
+            success=True,
+            content=json.dumps({
+                "message_id": message.message_id,
+                "to_task_id": to_task_id,
+                "status": "delivered",
+            }),
+        )
+
+    async def _handle_read_messages(
+        self,
+        tool_call: ToolCall,
+        parent_node: AgentNode,
+        workflow: WorkflowExecution,
+        trace_store: TraceStore,
+        roles_description: str,
+        wf_store: Optional[WorkflowFileStore] = None,
+    ) -> ToolResult:
+        """Handle read_messages tool call."""
+        cursor = self._message_cursors.get(parent_node.task_id, 0)
+        messages = self._coordinator.read_messages(parent_node.task_id, cursor)
+
+        # Advance cursor
+        new_cursor = cursor + len(messages)
+        self._message_cursors[parent_node.task_id] = new_cursor
+
+        if not messages:
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                success=True,
+                content="No new messages.",
+            )
+
+        return ToolResult(
+            tool_call_id=tool_call.id,
+            success=True,
+            content=json.dumps(
+                [m.to_dict() for m in messages],
+                indent=2,
+                default=str,
+            ),
+        )
+
+    async def _handle_set_shared_state(
+        self,
+        tool_call: ToolCall,
+        parent_node: AgentNode,
+        workflow: WorkflowExecution,
+        trace_store: TraceStore,
+        roles_description: str,
+        wf_store: Optional[WorkflowFileStore] = None,
+    ) -> ToolResult:
+        """Handle set_shared_state tool call."""
+        args = tool_call.arguments
+        key = args.get("key", "")
+        value = args.get("value")
+
+        if not key:
+            return ToolResult(
+                tool_call_id=tool_call.id, success=False, content="",
+                error="set_shared_state requires a non-empty 'key'.",
+            )
+
+        # Permission check
+        if not self._coordinator.can_access_state(
+            parent_node.task_id, key, "write", workflow,
+        ):
+            return ToolResult(
+                tool_call_id=tool_call.id, success=False, content="",
+                error=f"Access denied: cannot write shared state key '{key}'.",
+            )
+
+        self._coordinator.set_shared_state(
+            workflow_id=workflow.workflow_id,
+            key=key,
+            value=value,
+            set_by=parent_node.task_id,
+        )
+
+        return ToolResult(
+            tool_call_id=tool_call.id,
+            success=True,
+            content=json.dumps({
+                "key": key,
+                "status": "stored",
+            }),
+        )
+
+    async def _handle_get_shared_state(
+        self,
+        tool_call: ToolCall,
+        parent_node: AgentNode,
+        workflow: WorkflowExecution,
+        trace_store: TraceStore,
+        roles_description: str,
+        wf_store: Optional[WorkflowFileStore] = None,
+    ) -> ToolResult:
+        """Handle get_shared_state tool call."""
+        key = tool_call.arguments.get("key")
+
+        # Permission check
+        check_key = key or "*"
+        if not self._coordinator.can_access_state(
+            parent_node.task_id, check_key, "read", workflow,
+        ):
+            return ToolResult(
+                tool_call_id=tool_call.id, success=False, content="",
+                error=f"Access denied: cannot read shared state key '{check_key}'.",
+            )
+
+        result = self._coordinator.get_shared_state(
+            workflow_id=workflow.workflow_id,
+            key=key,
+        )
+
+        if result is None and key is not None:
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                success=True,
+                content=json.dumps({"key": key, "value": None, "exists": False}),
+            )
+
+        return ToolResult(
+            tool_call_id=tool_call.id,
+            success=True,
+            content=json.dumps(
+                {"key": key, "value": result} if key else {"state": result},
+                indent=2,
+                default=str,
+            ),
+        )
+
+    # -----------------------------------------------------------------------
     # Pending-task lifecycle helpers
     # -----------------------------------------------------------------------
 
     async def _cancel_pending_tasks(self) -> None:
-        """Cancel all pending background child tasks and await their completion."""
-        # Snapshot to avoid RuntimeError from dict mutation during iteration
-        tasks_snapshot = list(self._pending_tasks.values())
-        for task in tasks_snapshot:
-            if not task.done():
-                task.cancel()
-        # Wait for cancellation to propagate
-        if tasks_snapshot:
+        """Cancel all pending background child tasks and await their completion.
+
+        Loops until no new tasks remain — handles the race where a child
+        agent spawns another child just before being cancelled.
+        """
+        _MAX_ROUNDS = 5  # safety cap to avoid infinite loops
+        for _ in range(_MAX_ROUNDS):
+            tasks_snapshot = list(self._pending_tasks.values())
+            if not tasks_snapshot:
+                break
+            for task in tasks_snapshot:
+                if not task.done():
+                    task.cancel()
             await asyncio.gather(*tasks_snapshot, return_exceptions=True)
+            # Remove the tasks we just processed
+            done_ids = [
+                tid for tid, t in self._pending_tasks.items()
+                if t in tasks_snapshot
+            ]
+            for tid in done_ids:
+                self._pending_tasks.pop(tid, None)
+            # If no new tasks were added during await, we're done
+            if not self._pending_tasks:
+                break
+        # Final safety clear
         self._pending_tasks.clear()
 
     # -----------------------------------------------------------------------

@@ -4,8 +4,9 @@ Tool Executor for the Agentic Framework.
 Dispatches tool calls to their registered handlers, enforces per-tool
 timeouts, tracks call counts for rate limiting, validates inputs against
 JSON Schema before execution, validates outputs against output_schema
-after execution, supports configurable retry, and wraps document-sourced
-results in <untrusted_document_content> tags automatically.
+after execution, supports configurable retry, wraps document-sourced
+results in <untrusted_document_content> tags automatically, and runs
+a middleware chain (global + per-tool) around every execution.
 """
 
 from __future__ import annotations
@@ -14,12 +15,12 @@ import asyncio
 import inspect
 import json
 import logging
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from jsonschema import ValidationError as JsonSchemaValidationError
 from jsonschema import validate as jsonschema_validate
 
-from .core_types import Phase, ToolCall, ToolDef, ToolResult
+from .core_types import Phase, ToolCall, ToolContext, ToolDef, ToolMiddleware, ToolResult
 from .tool_registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -45,14 +46,42 @@ class ToolExecutor:
     - Validate handler output against the tool's output_schema JSON Schema
     - Track call counts for max_calls_per_phase enforcement
     - Wrap document content in <untrusted_document_content> tags
+    - Run global and per-tool middleware hooks around execution
     - Return structured ToolResult (never raises on tool failure)
     """
 
-    def __init__(self, registry: ToolRegistry) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        middleware: Optional[List[ToolMiddleware]] = None,
+        agent_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+    ) -> None:
         self._registry = registry
+        # Global middleware applied to ALL tools (runs outer, before per-tool)
+        self._middleware: List[ToolMiddleware] = list(middleware or [])
+        self._agent_id = agent_id
+        self._task_id = task_id
         # Track calls per (phase, tool_name) for rate limiting
         self._call_counts: Dict[str, int] = {}
         self._current_phase: Optional[Phase] = None
+
+    # -------------------------------------------------------------------
+    # Global middleware management
+    # -------------------------------------------------------------------
+
+    def add_middleware(self, mw: ToolMiddleware) -> None:
+        """Add a global middleware that applies to all tool executions."""
+        self._middleware.append(mw)
+
+    def remove_middleware(self, mw: ToolMiddleware) -> None:
+        """Remove a previously added global middleware."""
+        self._middleware.remove(mw)
+
+    @property
+    def middleware(self) -> List[ToolMiddleware]:
+        """Current global middleware list (read-only copy)."""
+        return list(self._middleware)
 
     def set_phase(self, phase: Phase) -> None:
         """Set the current phase and reset call counts."""
@@ -91,10 +120,11 @@ class ToolExecutor:
                        f"Available phases: {[p.value for p in tool_def.phase_availability]}",
             )
 
-        # Rate limit check — count is incremented before execution so that
-        # failed attempts are also counted, preventing infinite retry loops.
+        # Always track call counts (used by ToolContext and rate limiting).
+        # Count is incremented before execution so that failed attempts are
+        # also counted, preventing infinite retry loops.
+        count = self._call_counts.get(tool_call.name, 0)
         if tool_def.max_calls_per_phase is not None:
-            count = self._call_counts.get(tool_call.name, 0)
             if count >= tool_def.max_calls_per_phase:
                 return ToolResult(
                     tool_call_id=tool_call.id,
@@ -104,7 +134,7 @@ class ToolExecutor:
                            f"{tool_def.max_calls_per_phase} calls in the "
                            f"'{self._current_phase.value}' phase.",
                 )
-            self._call_counts[tool_call.name] = count + 1
+        self._call_counts[tool_call.name] = count + 1
 
         # Orchestrator tools should not be executed here
         if tool_def.is_orchestrator_tool:
@@ -136,6 +166,42 @@ class ToolExecutor:
                 error=input_error,
             )
 
+        # --- BUILD CONTEXT ---
+        context = ToolContext(
+            tool_name=tool_call.name,
+            phase=self._current_phase,
+            agent_id=self._agent_id,
+            task_id=self._task_id,
+            call_count=self._call_counts.get(tool_call.name, 0),
+        )
+
+        # --- MIDDLEWARE: PRE-CALL ---
+        # Chain: global middleware first, then per-tool middleware
+        all_middleware = self._middleware + (tool_def.middleware or [])
+        active_tool_call = tool_call
+        for mw in all_middleware:
+            try:
+                pre_result = await mw.pre_call(active_tool_call, tool_def, context)
+                if isinstance(pre_result, ToolResult):
+                    # Short-circuit: middleware returned a result directly
+                    # Still run post_call hooks on the short-circuited result
+                    return await self._run_post_call_chain(
+                        pre_result, tool_call, tool_def, context, all_middleware
+                    )
+                # pre_call returned a (possibly modified) ToolCall
+                active_tool_call = pre_result
+            except Exception as e:
+                logger.error(
+                    f"Middleware pre_call failed for tool '{tool_call.name}': {e}",
+                    exc_info=True,
+                )
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    success=False,
+                    content="",
+                    error=f"Middleware pre_call error: {e}",
+                )
+
         # --- EXECUTE WITH RETRY ---
         max_attempts = 1
         if tool_def.retry_on_failure and tool_def.max_retries > 0:
@@ -145,7 +211,7 @@ class ToolExecutor:
         for attempt in range(max_attempts):
             try:
                 result_content = await self._call_handler(
-                    tool_def, tool_call.arguments
+                    tool_def, active_tool_call.arguments
                 )
 
                 # --- OUTPUT VALIDATION ---
@@ -167,18 +233,32 @@ class ToolExecutor:
                 if tool_def.wraps_untrusted_content or tool_call.name in DOCUMENT_CONTENT_TOOLS:
                     serialized = self._wrap_untrusted(serialized)
 
-                return ToolResult(
+                result = ToolResult(
                     tool_call_id=tool_call.id,
                     success=True,
                     content=serialized,
                 )
 
-            except asyncio.TimeoutError:
+                # --- MIDDLEWARE: POST-CALL ---
+                return await self._run_post_call_chain(
+                    result, tool_call, tool_def, context, all_middleware
+                )
+
+            except asyncio.TimeoutError as e:
                 last_error = (
                     f"Tool '{tool_call.name}' timed out after "
                     f"{tool_def.timeout_ms}ms."
                 )
                 logger.warning(last_error)
+
+                # --- MIDDLEWARE: ON_ERROR ---
+                error_result = await self._run_on_error_chain(
+                    e, tool_call, tool_def, context, all_middleware,
+                    attempt, max_attempts,
+                )
+                if error_result is not None:
+                    return error_result
+
                 if attempt < max_attempts - 1:
                     backoff_delay = 2 ** attempt
                     logger.info(
@@ -192,6 +272,15 @@ class ToolExecutor:
             except Exception as e:
                 last_error = f"Tool '{tool_call.name}' failed: {str(e)}"
                 logger.error(last_error, exc_info=True)
+
+                # --- MIDDLEWARE: ON_ERROR ---
+                error_result = await self._run_on_error_chain(
+                    e, tool_call, tool_def, context, all_middleware,
+                    attempt, max_attempts,
+                )
+                if error_result is not None:
+                    return error_result
+
                 if attempt < max_attempts - 1:
                     backoff_delay = 2 ** attempt
                     logger.info(
@@ -209,6 +298,57 @@ class ToolExecutor:
             content="",
             error=last_error,
         )
+
+    # -------------------------------------------------------------------
+    # Middleware chain helpers
+    # -------------------------------------------------------------------
+
+    @staticmethod
+    async def _run_post_call_chain(
+        result: ToolResult,
+        tool_call: ToolCall,
+        tool_def: ToolDef,
+        context: ToolContext,
+        middleware: List[ToolMiddleware],
+    ) -> ToolResult:
+        """Run post_call on all middleware in reverse order."""
+        current = result
+        for mw in reversed(middleware):
+            try:
+                current = await mw.post_call(current, tool_call, tool_def, context)
+            except Exception as e:
+                logger.error(
+                    f"Middleware post_call failed for tool '{tool_call.name}': {e}",
+                    exc_info=True,
+                )
+                # Don't swallow the original result — return it as-is
+                return current
+        return current
+
+    @staticmethod
+    async def _run_on_error_chain(
+        error: Exception,
+        tool_call: ToolCall,
+        tool_def: ToolDef,
+        context: ToolContext,
+        middleware: List[ToolMiddleware],
+        attempt: int,
+        max_attempts: int,
+    ) -> Optional[ToolResult]:
+        """Run on_error on all middleware. First non-None result wins."""
+        for mw in middleware:
+            try:
+                result = await mw.on_error(
+                    error, tool_call, tool_def, context, attempt, max_attempts
+                )
+                if result is not None:
+                    return result
+            except Exception as e:
+                logger.error(
+                    f"Middleware on_error failed for tool '{tool_call.name}': {e}",
+                    exc_info=True,
+                )
+        return None
 
     # -------------------------------------------------------------------
     # Validation helpers

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,47 @@ class WorkflowStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# Literal type aliases for status fields
+# ---------------------------------------------------------------------------
+
+AgentOutputStatus = Literal["completed", "degraded", "failed", "partial"]
+"""Status of an agent's output."""
+
+PlanContextStatus = Literal["in_progress", "replanning"]
+"""Status of a plan context."""
+
+PlanContextType = Literal["full_plan", "plan_fragment"]
+"""Type of plan context."""
+
+ExecutionPath = Literal["full_workflow", "direct_answer", "adaptive"]
+"""How the agent's execution was routed."""
+
+AdaptiveMode = Literal["direct_answer", "light_work", "deep_work"]
+"""Which mode the agent selected in adaptive flow."""
+
+MessageType = Literal["info", "request", "response", "warning", "data"]
+"""Type of inter-agent message."""
+
+DirectAnswerSchemaPolicy = Literal["enforce", "bypass"]
+"""Per-role policy for output schema handling during direct-answer bypass.
+
+- ``"enforce"``: Direct answer must produce schema-compliant JSON output.
+- ``"bypass"``:  Direct answer is free-form text (chat-like), schema ignored.
+
+When not set (``None``), the global
+``SimpleQueryBypassConfig.force_full_workflow_if_output_schema`` gate applies.
+"""
+
+ToolAccessLevel = Literal["none", "visible", "callable"]
+"""Three-tier tool access per phase.
+
+- ``"none"``:     Tool hidden entirely (not in schema, not in prompt).
+- ``"visible"``:  Tool description shown in prompt (read-only awareness).
+- ``"callable"``: Tool shown in LLM function schema and callable.
+"""
 
 
 class ErrorSource(str, Enum):
@@ -161,6 +202,135 @@ class TokenUsage:
 
 
 # ---------------------------------------------------------------------------
+# Tool lifecycle hooks
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ToolContext:
+    """
+    Context passed to tool middleware hooks.
+
+    Provides information about the current execution environment so
+    middleware can make decisions based on phase, agent, and call history.
+    """
+    tool_name: str
+    phase: Optional[Phase] = None
+    agent_id: Optional[str] = None
+    task_id: Optional[str] = None
+    call_count: int = 0  # How many times this tool has been called in this phase
+    metadata: Dict[str, Any] = field(default_factory=dict)  # User-defined data passed between hooks
+
+
+class ToolMiddleware:
+    """
+    Base class for tool lifecycle hooks.
+
+    Subclass and override any method to intercept tool execution.
+    All methods have sensible defaults (pass-through), so you only
+    need to override what you care about.
+
+    Middleware can be attached globally (on ToolExecutor) or per-tool
+    (on ToolDef). Global middleware runs first (outer), per-tool
+    middleware runs second (inner).
+
+    Example::
+
+        class LoggingMiddleware(ToolMiddleware):
+            async def pre_call(self, tool_call, tool_def, context):
+                print(f"Calling {tool_call.name} with {tool_call.arguments}")
+                return tool_call  # pass through unchanged
+
+            async def post_call(self, result, tool_call, tool_def, context):
+                print(f"Result: {result.success}")
+                return result  # pass through unchanged
+
+        class CachingMiddleware(ToolMiddleware):
+            def __init__(self):
+                self._cache = {}
+
+            async def pre_call(self, tool_call, tool_def, context):
+                key = (tool_call.name, str(tool_call.arguments))
+                if key in self._cache:
+                    # Short-circuit: return cached ToolResult directly
+                    return self._cache[key]
+                return tool_call
+
+            async def post_call(self, result, tool_call, tool_def, context):
+                if result.success:
+                    key = (tool_call.name, str(tool_call.arguments))
+                    self._cache[key] = result
+                return result
+    """
+
+    async def pre_call(
+        self,
+        tool_call: ToolCall,
+        tool_def: "ToolDef",
+        context: ToolContext,
+    ) -> Union[ToolCall, ToolResult]:
+        """
+        Called before tool execution.
+
+        Args:
+            tool_call: The tool invocation from the LLM.
+            tool_def: The tool definition.
+            context: Execution context with phase, agent, and metadata.
+
+        Returns:
+            - A ToolCall (possibly modified) to continue execution.
+            - A ToolResult to short-circuit execution (skip handler entirely).
+        """
+        return tool_call
+
+    async def post_call(
+        self,
+        result: ToolResult,
+        tool_call: ToolCall,
+        tool_def: "ToolDef",
+        context: ToolContext,
+    ) -> ToolResult:
+        """
+        Called after successful tool execution.
+
+        Args:
+            result: The result from the handler (or from a pre_call short-circuit).
+            tool_call: The original tool invocation.
+            tool_def: The tool definition.
+            context: Execution context.
+
+        Returns:
+            A ToolResult (possibly modified).
+        """
+        return result
+
+    async def on_error(
+        self,
+        error: Exception,
+        tool_call: ToolCall,
+        tool_def: "ToolDef",
+        context: ToolContext,
+        attempt: int,
+        max_attempts: int,
+    ) -> Optional[ToolResult]:
+        """
+        Called when tool execution raises an exception.
+
+        Args:
+            error: The exception that was raised.
+            tool_call: The original tool invocation.
+            tool_def: The tool definition.
+            context: Execution context.
+            attempt: Current attempt number (0-based).
+            max_attempts: Total allowed attempts.
+
+        Returns:
+            - None to let the default retry/fail logic proceed.
+            - A ToolResult to short-circuit (skip remaining retries).
+        """
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Tool definitions
 # ---------------------------------------------------------------------------
 
@@ -177,6 +347,9 @@ class ToolDef:
     parameters: Dict[str, Any]  # JSON Schema
     handler: Optional[Callable] = None
     phase_availability: List[Phase] = field(default_factory=lambda: list(Phase))
+    # Phases where this tool's description is shown but not callable.
+    # Default (empty): auto-inferred — domain tools callable in ACT are visible in PLAN.
+    phase_visibility: List[Phase] = field(default_factory=list)
     mandatory_in_phases: Optional[List[Phase]] = None
     is_framework_tool: bool = False
     is_orchestrator_tool: bool = False  # spawn_agent, wait_for_agents, etc.
@@ -188,6 +361,11 @@ class ToolDef:
     retry_on_failure: bool = False                   # Auto-retry on handler exception
     max_retries: int = 0                             # Retry attempts (only if retry_on_failure)
     wraps_untrusted_content: bool = False            # Results contain user-uploaded content
+    # Stall detection hints
+    is_read_only: bool = False                       # Tool makes no state change (e.g. get_todo_list)
+    marks_progress: bool = False                     # Tool represents genuine work output (e.g. log_finding)
+    # Per-tool middleware (runs inside global middleware)
+    middleware: List[ToolMiddleware] = field(default_factory=list)
 
     def to_llm_schema(self) -> Dict[str, Any]:
         """Convert to the schema format sent to the LLM."""
@@ -197,6 +375,12 @@ class ToolDef:
             "parameters": self.parameters,
         }
         return schema
+
+    def to_description_text(self) -> str:
+        """Text-only summary for non-callable contexts (visible-only phases)."""
+        params = self.parameters.get("properties", {})
+        param_names = ", ".join(params.keys()) if params else "none"
+        return f"- {self.name}: {self.description} (params: {param_names})"
 
     def __repr__(self) -> str:
         phases = ",".join(p.value for p in self.phase_availability)
@@ -273,8 +457,8 @@ class PlanContext:
     """Plan information passed to an agent."""
     plan: List[PlanStep] = field(default_factory=list)
     current_agent_assignment: Optional[str] = None
-    status: str = "in_progress"  # "in_progress" | "replanning"
-    type: str = "full_plan"  # "full_plan" | "plan_fragment"
+    status: PlanContextStatus = "in_progress"
+    type: PlanContextType = "full_plan"
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +473,74 @@ class StallDetectionConfig:
     max_fw_only_consecutive_iterations: int = 10
     max_duplicate_call_iterations: int = 4
     duplicate_call_window: int = 8
+
+
+@dataclass
+class PhaseConfig:
+    """Configurable phase lifecycle for an agent.
+
+    Controls which phases run, in what order, their iteration limits,
+    custom prompts, and review retry behavior.
+
+    Default: the standard PLAN -> ACT -> REVIEW -> REPORT sequence.
+
+    Example::
+
+        # Skip review:
+        PhaseConfig(phases=[Phase.PLAN, Phase.ACT, Phase.REPORT])
+
+        # Custom prompts:
+        PhaseConfig(phase_prompts={Phase.ACT: "Custom act instructions..."})
+
+        # No review retry:
+        PhaseConfig(max_review_cycles=0)
+
+        # Act-only:
+        PhaseConfig(phases=[Phase.ACT])
+    """
+    phases: List[Phase] = field(
+        default_factory=lambda: [Phase.PLAN, Phase.ACT, Phase.REVIEW, Phase.REPORT]
+    )
+    phase_limits: Optional[Dict[Phase, int]] = None
+    phase_prompts: Optional[Dict[Phase, str]] = None
+    max_review_cycles: int = 2
+    # Which phase triggers review evaluation. None = auto-detect REVIEW in phases.
+    review_phase: Optional[Phase] = None
+    # Which phase to re-run on review failure. None = phase before review_phase.
+    review_retry_phase: Optional[Phase] = None
+
+    @property
+    def effective_review_phase(self) -> Optional[Phase]:
+        """The phase that triggers review evaluation."""
+        if self.review_phase is not None:
+            return self.review_phase if self.review_phase in self.phases else None
+        return Phase.REVIEW if Phase.REVIEW in self.phases else None
+
+    @property
+    def effective_review_retry_phase(self) -> Optional[Phase]:
+        """The phase re-run on review failure (before re-reviewing)."""
+        if self.review_retry_phase is not None:
+            return self.review_retry_phase if self.review_retry_phase in self.phases else None
+        review = self.effective_review_phase
+        if review is None:
+            return None
+        try:
+            idx = self.phases.index(review)
+        except ValueError:
+            return None
+        return self.phases[idx - 1] if idx > 0 else None
+
+
+@dataclass
+class OutputValidationResult:
+    """Result from output validation.
+
+    Returned by :class:`OutputValidator.validate()`. Multiple validators
+    can contribute errors and warnings independently.
+    """
+    is_valid: bool = True
+    errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -311,6 +563,22 @@ class SimpleQueryBypassConfig:
     force_full_workflow_if_output_schema: bool = True
     allow_escalation_to_full_workflow: bool = True
     direct_answer_max_tokens: int = 512
+
+
+@dataclass(frozen=True)
+class AdaptiveFlowConfig:
+    """Configuration for agent-controlled adaptive phase flow.
+
+    When enabled, the agent decides its own execution path from the very
+    first LLM call. All tools are presented upfront and the agent's
+    behavior (tool calls vs text-only) determines whether it enters
+    PLAN, ACT, or answers directly.
+
+    PLAN and REVIEW become optional — the agent decides when they're
+    needed.  ACT and REPORT remain mandatory for tool-based work.
+    """
+    enabled: bool = True
+    entry_phase_limit: int = 3
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +626,7 @@ class AgentInput:
     additional_context: Optional[str] = None
     parent_errors: Optional[List[ErrorEntry]] = None
     budget: BudgetConfig = field(default_factory=BudgetConfig)
+    direct_answer_schema_policy: Optional[str] = None  # "enforce" | "bypass" | None
 
     def __repr__(self) -> str:
         task_preview = self.task[:50]
@@ -377,8 +646,9 @@ class ExecutionMetadata:
     tools_called: List[Dict[str, Any]] = field(default_factory=list)
     total_duration_ms: float = 0.0
     phase_outputs: Dict[str, str] = field(default_factory=dict)  # phase_name -> LLM text
-    execution_path: str = "full_workflow"  # "full_workflow" | "direct_answer"
+    execution_path: ExecutionPath = "full_workflow"
     routing_decision: Optional[Dict[str, Any]] = None
+    detected_mode: Optional[str] = None
 
 
 @dataclass
@@ -392,7 +662,7 @@ class AgentOutput:
     agent_id: str
     role: str
     sub_role: Optional[str] = None
-    status: str = "completed"  # "completed" | "degraded" | "failed" | "partial"
+    status: AgentOutputStatus = "completed"
     summary: str = ""
     findings: Dict[str, Any] = field(default_factory=dict)
     artifacts: List[str] = field(default_factory=list)
@@ -486,6 +756,33 @@ class AgentNode:
     budget_consumed: BudgetUsage = field(default_factory=BudgetUsage)
     depth: int = 0
     review_attempts: int = 0
+
+
+@dataclass
+class AgentMessage:
+    """A message sent between agents during workflow execution.
+
+    Used by the coordination system for inter-agent communication.
+    Messages can carry both human-readable content and structured data.
+    """
+    message_id: str = field(default_factory=generate_id)
+    from_task_id: str = ""
+    to_task_id: str = ""
+    content: str = ""
+    message_type: MessageType = "info"
+    data: Dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=utc_now)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "message_id": self.message_id,
+            "from_task_id": self.from_task_id,
+            "to_task_id": self.to_task_id,
+            "content": self.content,
+            "message_type": self.message_type,
+            "data": self.data,
+            "timestamp": self.timestamp.isoformat(),
+        }
 
 
 @dataclass

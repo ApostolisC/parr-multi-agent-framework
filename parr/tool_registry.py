@@ -35,6 +35,30 @@ class ToolRegistry:
         self._tools[tool.name] = tool
         logger.debug(f"Registered tool: {tool.name}")
 
+    def override(self, tool: ToolDef) -> Optional[ToolDef]:
+        """
+        Replace an existing tool registration.
+
+        This is the mechanism for overriding framework tools with custom
+        implementations. If the tool doesn't exist yet, it is registered
+        as new.
+
+        Args:
+            tool: The new ToolDef to register (replaces any existing tool
+                  with the same name).
+
+        Returns:
+            The previous ToolDef if one was replaced, or None if this was
+            a new registration.
+        """
+        previous = self._tools.get(tool.name)
+        self._tools[tool.name] = tool
+        if previous is not None:
+            logger.info(f"Overrode tool: {tool.name}")
+        else:
+            logger.debug(f"Registered tool (via override): {tool.name}")
+        return previous
+
     def register_many(self, tools: List[ToolDef]) -> None:
         """Register multiple tools at once."""
         for tool in tools:
@@ -60,6 +84,38 @@ class ToolRegistry:
             if phase in tool.phase_availability
         ]
 
+    def get_visible_for_phase(self, phase: Phase) -> List[ToolDef]:
+        """
+        Get tools whose descriptions should be shown (but not callable) in a phase.
+
+        A tool is visible when:
+        1. It has the phase in its explicit ``phase_visibility`` list, OR
+        2. Auto-inference: ``phase_visibility`` is empty AND the tool is a
+           domain tool callable in ACT AND the requested phase is PLAN.
+
+        Tools already callable in the phase are excluded.
+        """
+        callable_names = {
+            t.name for t in self._tools.values()
+            if phase in t.phase_availability
+        }
+        visible: List[ToolDef] = []
+        for tool in self._tools.values():
+            if tool.name in callable_names:
+                continue
+            if tool.phase_visibility:
+                if phase in tool.phase_visibility:
+                    visible.append(tool)
+            else:
+                # Auto-inference: domain tools callable in ACT → visible in PLAN
+                if (
+                    not tool.is_framework_tool
+                    and Phase.ACT in tool.phase_availability
+                    and phase == Phase.PLAN
+                ):
+                    visible.append(tool)
+        return visible
+
     def get_mandatory_for_phase(self, phase: Phase) -> List[ToolDef]:
         """Get tools that MUST be called during a phase."""
         return [
@@ -70,6 +126,19 @@ class ToolRegistry:
     def get_all(self) -> List[ToolDef]:
         """Get all registered tools."""
         return list(self._tools.values())
+
+    def get_for_entry(self) -> List[ToolDef]:
+        """Get tools available in the adaptive-flow entry call.
+
+        Returns all tools except phase-specific ones that only make sense
+        during REVIEW or REPORT (review_checklist, get_report_template,
+        submit_report).
+        """
+        _ENTRY_EXCLUDED = {"review_checklist", "get_report_template", "submit_report"}
+        return [
+            tool for tool in self._tools.values()
+            if tool.name not in _ENTRY_EXCLUDED
+        ]
 
     def get_orchestrator_tools(self) -> List[ToolDef]:
         """Get tools that require orchestrator-level handling (spawn, wait, etc.)."""

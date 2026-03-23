@@ -34,14 +34,18 @@ Design decisions:
 - **Optional**: Persistence is activated only when the orchestrator is
   created with a ``persist_dir``.  All existing behaviour is unchanged
   when persistence is disabled.
-- **Synchronous I/O**: File writes are fast (small JSON files) so we
-  use synchronous ``pathlib`` operations. No asyncio file I/O needed.
+- **Dual I/O modes**: Synchronous methods for backward compatibility,
+  plus ``async_*`` variants that use ``asyncio.to_thread()`` to avoid
+  blocking the event loop in async callers.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -66,7 +70,13 @@ def _json_default(obj: Any) -> Any:
 
 
 def _write_json(path: Path, data: Any) -> None:
-    """Atomically write *data* as pretty-printed JSON to *path*."""
+    """Atomically write *data* as pretty-printed JSON to *path*.
+
+    On Windows, ``Path.replace()`` can fail with ``PermissionError``
+    (WinError 5) if another thread/process holds the target file open
+    (e.g. the debug UI reading it).  We retry a few times with a short
+    back-off before giving up.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     try:
@@ -74,7 +84,20 @@ def _write_json(path: Path, data: Any) -> None:
             json.dumps(data, indent=2, default=_json_default, ensure_ascii=False),
             encoding="utf-8",
         )
-        tmp.replace(path)
+        # Retry rename on Windows file-locking errors
+        last_err: Optional[Exception] = None
+        for attempt in range(5):
+            try:
+                tmp.replace(path)
+                return  # success
+            except PermissionError as exc:
+                last_err = exc
+                if os.name != "nt":
+                    raise  # Only retry on Windows
+                time.sleep(0.05 * (attempt + 1))  # 50ms, 100ms, 150ms, ...
+        # Exhausted retries
+        if last_err is not None:
+            raise last_err  # pragma: no cover
     except Exception:
         # Clean up temp file on failure
         tmp.unlink(missing_ok=True)
@@ -82,10 +105,36 @@ def _write_json(path: Path, data: Any) -> None:
 
 
 def _read_json(path: Path) -> Any:
-    """Read and parse a JSON file. Returns ``None`` if the file is missing."""
-    if not path.exists():
-        return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    """Read and parse a JSON file. Returns ``None`` if the file is missing.
+
+    On Windows, retries on ``PermissionError`` (WinError 5) which can
+    occur when another thread is writing to the same file.
+    """
+    last_perm_err: Optional[Exception] = None
+    for attempt in range(3):
+        try:
+            if not path.exists():
+                return None
+            return json.loads(path.read_text(encoding="utf-8"))
+        except PermissionError as exc:
+            last_perm_err = exc
+            if os.name != "nt":
+                raise  # Only retry on Windows
+            time.sleep(0.03 * (attempt + 1))  # 30ms, 60ms, 90ms
+        except (json.JSONDecodeError, OSError):
+            return None
+    if last_perm_err is not None:
+        raise last_perm_err
+
+
+async def _awrite_json(path: Path, data: Any) -> None:
+    """Async variant of :func:`_write_json` — runs in a thread pool."""
+    await asyncio.to_thread(_write_json, path, data)
+
+
+async def _aread_json(path: Path) -> Any:
+    """Async variant of :func:`_read_json` — runs in a thread pool."""
+    return await asyncio.to_thread(_read_json, path)
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +168,7 @@ class AgentFileStore:
         (self._dir / "memory").mkdir(exist_ok=True)
         # Initialise empty lists for incremental appending
         self._tool_calls: List[Dict[str, Any]] = []
+        self._llm_calls: List[Dict[str, Any]] = []
         self._conversations: Dict[str, Any] = {}
         self._sub_agents_summary: List[Dict[str, Any]] = []
 
@@ -176,22 +226,53 @@ class AgentFileStore:
         """
         Append a phase entry to ``conversation.json``.
 
-        Each phase gets one top-level key in the JSON object.
+        For review phases that run multiple times (retry cycles), each
+        execution is stored as an entry in a list under a ``_history`` key
+        so the UI can show all review iterations. The top-level entry
+        always reflects the latest execution.
         """
-        self._conversations[phase] = {
+        import time as _time
+        entry = {
             "content": content,
             "iterations": iterations,
             "hit_iteration_limit": hit_iteration_limit,
             "tool_calls_count": len(tool_calls_made) if tool_calls_made else 0,
+            "timestamp": _time.time(),
         }
+        # If this phase already has an entry, preserve history
+        existing = self._conversations.get(phase)
+        if existing is not None:
+            history = existing.get("_history", [])
+            # Store the previous entry (without its own _history) in history
+            prev = {k: v for k, v in existing.items() if k != "_history"}
+            history.append(prev)
+            entry["_history"] = history
+        self._conversations[phase] = entry
         _write_json(self._dir / "conversation.json", self._conversations)
 
     # -- Tool calls ---------------------------------------------------------
 
     def append_tool_calls(self, calls: List[Dict[str, Any]]) -> None:
-        """Append tool call records to ``tool_calls.json``."""
+        """Append tool call records to ``tool_calls.json``.
+
+        Each record is automatically assigned a ``seq`` (sequence number)
+        and ``timestamp`` if not already present.
+        """
+        import time as _time
+        for call in calls:
+            if "seq" not in call:
+                call["seq"] = len(self._tool_calls)
+            if "timestamp" not in call:
+                call["timestamp"] = _time.time()
         self._tool_calls.extend(calls)
         _write_json(self._dir / "tool_calls.json", self._tool_calls)
+
+    # -- LLM calls ----------------------------------------------------------
+
+    def append_llm_calls(self, calls: List[Dict[str, Any]]) -> None:
+        """Append LLM call records to ``llm_calls.json``."""
+        self._llm_calls.extend(calls)
+        _write_json(self._dir / "llm_calls.json", self._llm_calls)
 
     # -- Working memory -----------------------------------------------------
 
@@ -226,7 +307,7 @@ class AgentFileStore:
                 "completed": t.completed,
                 "completion_summary": t.completion_summary,
             }
-            for t in getattr(memory, "todo_list", [])
+            for t in (getattr(memory, "todo_list", None) or [])
         ])
         self.save_findings([
             {
@@ -235,7 +316,7 @@ class AgentFileStore:
                 "source": f.source,
                 "confidence": f.confidence,
             }
-            for f in getattr(memory, "findings", [])
+            for f in (getattr(memory, "findings", None) or [])
         ])
         self.save_review([
             {
@@ -243,7 +324,7 @@ class AgentFileStore:
                 "rating": r.rating,
                 "justification": r.justification,
             }
-            for r in getattr(memory, "review_checklist", [])
+            for r in (getattr(memory, "review_checklist", None) or [])
         ])
         self.save_report(getattr(memory, "submitted_report", None))
 
@@ -332,6 +413,44 @@ class AgentFileStore:
             "review": _read_json(self._dir / "memory" / "review.json"),
             "report": _read_json(self._dir / "memory" / "report.json"),
         }
+
+    # -- Async variants (thread-pool I/O) -----------------------------------
+
+    async def async_save_agent_info(self, **kwargs: Any) -> None:
+        """Async variant of :meth:`save_agent_info`."""
+        await asyncio.to_thread(self.save_agent_info, **kwargs)
+
+    async def async_update_agent_status(self, status: str) -> None:
+        """Async variant of :meth:`update_agent_status`."""
+        await asyncio.to_thread(self.update_agent_status, status)
+
+    async def async_save_phase_conversation(self, phase: str, **kwargs: Any) -> None:
+        """Async variant of :meth:`save_phase_conversation`."""
+        await asyncio.to_thread(self.save_phase_conversation, phase, **kwargs)
+
+    async def async_append_tool_calls(self, calls: List[Dict[str, Any]]) -> None:
+        """Async variant of :meth:`append_tool_calls`."""
+        await asyncio.to_thread(self.append_tool_calls, calls)
+
+    async def async_append_llm_calls(self, calls: List[Dict[str, Any]]) -> None:
+        """Async variant of :meth:`append_llm_calls`."""
+        await asyncio.to_thread(self.append_llm_calls, calls)
+
+    async def async_save_memory(self, memory: Any) -> None:
+        """Async variant of :meth:`save_memory`."""
+        await asyncio.to_thread(self.save_memory, memory)
+
+    async def async_save_output(self, output: Any) -> None:
+        """Async variant of :meth:`save_output`."""
+        await asyncio.to_thread(self.save_output, output)
+
+    async def async_register_child(self, **kwargs: Any) -> None:
+        """Async variant of :meth:`register_child`."""
+        await asyncio.to_thread(self.register_child, **kwargs)
+
+    async def async_update_child_status(self, task_id: str, status: str) -> None:
+        """Async variant of :meth:`update_child_status`."""
+        await asyncio.to_thread(self.update_child_status, task_id, status)
 
 
 # ---------------------------------------------------------------------------
@@ -426,3 +545,13 @@ class WorkflowFileStore:
     def read_workflow_info(self) -> Optional[Dict[str, Any]]:
         """Read workflow.json."""
         return _read_json(self._workflow_dir / "workflow.json")
+
+    # -- Async variants (thread-pool I/O) -----------------------------------
+
+    async def async_save_workflow_info(self, **kwargs: Any) -> None:
+        """Async variant of :meth:`save_workflow_info`."""
+        await asyncio.to_thread(self.save_workflow_info, **kwargs)
+
+    async def async_update_workflow_status(self, status: str) -> None:
+        """Async variant of :meth:`update_workflow_status`."""
+        await asyncio.to_thread(self.update_workflow_status, status)

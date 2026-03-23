@@ -20,15 +20,14 @@ import json
 import logging
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
-
-from jsonschema import ValidationError as JsonSchemaValidationError
-from jsonschema import validate as jsonschema_validate
 
 from .adapters.llm_adapter import ContentFilterError
 from .budget_tracker import BudgetExceededException, BudgetTracker
 from .context_manager import ContextManager
 from .event_bus import EventBus
+from .output_validator import JsonSchemaValidator, OutputValidator
 from .event_types import (
     agent_completed,
     agent_failed,
@@ -39,15 +38,18 @@ from .framework_tools import (
     AgentWorkingMemory,
     build_act_tools,
     build_agent_management_tools,
+    build_coordination_tools,
     build_plan_tools,
     build_report_tools,
     build_review_tools,
+    build_transition_tools,
 )
 from .persistence import AgentFileStore
 from .phase_runner import CancelledException, PhaseResult, PhaseRunner
 from .tool_executor import ToolExecutor
 from .tool_registry import ToolRegistry
 from .core_types import (
+    AdaptiveFlowConfig,
     AgentConfig,
     AgentInput,
     AgentNode,
@@ -61,6 +63,7 @@ from .core_types import (
     MessageRole,
     ModelConfig,
     Phase,
+    PhaseConfig,
     SimpleQueryBypassConfig,
     StallDetectionConfig,
     ToolCall,
@@ -79,6 +82,7 @@ REVIEW_PASSED_MARKER = "REVIEW_PASSED"
 REVIEW_FAILED_MARKER = "REVIEW_FAILED"
 EXECUTION_PATH_DIRECT = "direct_answer"
 EXECUTION_PATH_FULL = "full_workflow"
+EXECUTION_PATH_ADAPTIVE = "adaptive"
 
 
 class AgentRuntime:
@@ -104,12 +108,13 @@ class AgentRuntime:
         simple_query_bypass: Optional[SimpleQueryBypassConfig] = None,
         budget_config: Optional[BudgetConfig] = None,
         agent_file_store: Optional[AgentFileStore] = None,
+        phase_config: Optional[PhaseConfig] = None,
+        output_validator: Optional[OutputValidator] = None,
+        adaptive_config: Optional[AdaptiveFlowConfig] = None,
     ) -> None:
         self._llm = llm
         self._budget_tracker = budget_tracker
         self._event_bus = event_bus
-        self._max_review_cycles = max_review_cycles
-        self._phase_limits = phase_limits
         self._available_roles_description = available_roles_description
         self._report_template_handler = report_template_handler
         self._stream = stream
@@ -117,6 +122,19 @@ class AgentRuntime:
         self._simple_query_bypass = simple_query_bypass or SimpleQueryBypassConfig()
         self._budget_config = budget_config
         self._file_store = agent_file_store
+        self._output_validator = output_validator or JsonSchemaValidator()
+        self._adaptive_config = adaptive_config
+        # PhaseConfig: if provided, takes precedence; otherwise built from legacy params
+        if phase_config is not None:
+            self._phase_config = phase_config
+        else:
+            self._phase_config = PhaseConfig(
+                max_review_cycles=max_review_cycles,
+                phase_limits=phase_limits,
+            )
+        # Expose for backward compatibility
+        self._max_review_cycles = self._phase_config.max_review_cycles
+        self._phase_limits = self._phase_config.phase_limits
 
     async def execute(
         self,
@@ -157,7 +175,31 @@ class AgentRuntime:
             soft_compaction_pct=self._budget_config.context_soft_compaction_pct if self._budget_config else 0.40,
             hard_truncation_pct=self._budget_config.context_hard_truncation_pct if self._budget_config else 0.65,
             chars_per_token=self._budget_config.chars_per_token if self._budget_config else 4.0,
+            phase_prompts=self._phase_config.phase_prompts,
+            phase_sequence=self._phase_config.phases,
         )
+
+        # Incremental persistence callback — writes each tool call and
+        # memory snapshot to disk immediately so the debug UI can show
+        # live updates during phase execution (not just at phase end).
+        def _on_tool_persisted(tool_record: Dict[str, Any]) -> None:
+            if not self._file_store:
+                return
+            try:
+                self._file_store.append_tool_calls([tool_record])
+                self._file_store.save_memory(memory)
+            except Exception as e:
+                logger.debug("Incremental persist failed: %s", e)
+
+        # Incremental LLM call persistence — writes each LLM call record
+        # to disk so the debug UI can show per-iteration details.
+        def _on_llm_call_persisted(llm_record: Dict[str, Any]) -> None:
+            if not self._file_store:
+                return
+            try:
+                self._file_store.append_llm_calls([llm_record])
+            except Exception as e:
+                logger.debug("Incremental LLM call persist failed: %s", e)
 
         phase_runner = PhaseRunner(
             llm=self._llm,
@@ -169,6 +211,8 @@ class AgentRuntime:
             phase_limits=self._phase_limits,
             stream=self._stream,
             stall_config=self._stall_config,
+            on_tool_persisted=_on_tool_persisted if self._file_store else None,
+            on_llm_call_persisted=_on_llm_call_persisted if self._file_store else None,
         )
 
         # Emit agent started
@@ -188,6 +232,26 @@ class AgentRuntime:
         execution_metadata.execution_path = EXECUTION_PATH_FULL
 
         try:
+            # ── Adaptive flow (agent-controlled path) ──
+            if self._adaptive_config and self._adaptive_config.enabled:
+                return await self._run_adaptive_flow(
+                    config=config,
+                    input=input,
+                    node=node,
+                    workflow=workflow,
+                    memory=memory,
+                    registry=registry,
+                    tool_executor=tool_executor,
+                    context_manager=context_manager,
+                    phase_runner=phase_runner,
+                    execution_metadata=execution_metadata,
+                    total_usage=total_usage,
+                    errors=errors,
+                    start_time=start_time,
+                    on_orchestrator_tool=on_orchestrator_tool,
+                )
+
+            # ── Legacy flow (router-controlled path) ──
             routing_decision = await self._route_execution_path(
                 config=config,
                 input=input,
@@ -240,216 +304,79 @@ class AgentRuntime:
                     ))
                     return output
 
-            # ── Phase 1: Plan ──
-            plan_result = await self._run_phase(
-                phase_runner=phase_runner,
-                phase=Phase.PLAN,
-                node=node,
-                workflow=workflow,
-                config=config,
-                input=input,
-                context_manager=context_manager,
-                memory=memory,
-                on_orchestrator_tool=on_orchestrator_tool,
-            )
-            self._accumulate_usage(total_usage, plan_result)
-            self._accumulate_tool_calls(execution_metadata, plan_result)
-            execution_metadata.phases_completed.append("plan")
-            execution_metadata.iterations_per_phase["plan"] = plan_result.iterations
-            execution_metadata.phase_outputs["plan"] = plan_result.content or ""
-            if plan_result.hit_iteration_limit:
-                phases_hitting_limit.append("plan")
-            self._persist_phase(plan_result, memory)
+            # ── Run configured phase sequence ──
+            review_phase = self._phase_config.effective_review_phase
+            review_retry_phase = self._phase_config.effective_review_retry_phase
+            last_phase_result: Optional[PhaseResult] = None
 
-            # ── Phase 2: Act ──
-            act_result = await self._run_phase(
-                phase_runner=phase_runner,
-                phase=Phase.ACT,
-                node=node,
-                workflow=workflow,
-                config=config,
-                input=input,
-                context_manager=context_manager,
-                memory=memory,
-                on_orchestrator_tool=on_orchestrator_tool,
-            )
-            self._accumulate_usage(total_usage, act_result)
-            self._accumulate_tool_calls(execution_metadata, act_result)
-            execution_metadata.phases_completed.append("act")
-            execution_metadata.iterations_per_phase["act"] = act_result.iterations
-            execution_metadata.phase_outputs["act"] = act_result.content or ""
-            if act_result.hit_iteration_limit:
-                phases_hitting_limit.append("act")
-            self._persist_phase(act_result, memory)
-
-            # ── Phase 3: Review (with retry loop) ──
-            review_result = await self._run_phase(
-                phase_runner=phase_runner,
-                phase=Phase.REVIEW,
-                node=node,
-                workflow=workflow,
-                config=config,
-                input=input,
-                context_manager=context_manager,
-                memory=memory,
-                on_orchestrator_tool=on_orchestrator_tool,
-            )
-            self._accumulate_usage(total_usage, review_result)
-            self._accumulate_tool_calls(execution_metadata, review_result)
-
-            review_pass = self._evaluate_review(review_result, memory)
-            review_iterations = review_result.iterations
-            retry_count = 0
-            prev_fail_count = self._count_review_failures(memory)
-
-            # If the LLM produced no checklist and no REVIEW_PASSED/FAILED
-            # marker, re-prompt once to get a clear signal before defaulting.
-            if review_pass is None:
-                logger.info(
-                    f"Review produced no structured signal for agent "
-                    f"{config.agent_id}. Re-prompting for explicit evaluation."
-                )
-                memory.review_checklist = None
-                review_result = await self._run_phase(
-                    phase_runner=phase_runner,
-                    phase=Phase.REVIEW,
-                    node=node,
-                    workflow=workflow,
-                    config=config,
-                    input=input,
-                    context_manager=context_manager,
-                    memory=memory,
-                    on_orchestrator_tool=on_orchestrator_tool,
-                    extra_context=(
-                        "Your previous review did not produce a clear verdict. "
-                        "You MUST use the review_checklist tool to evaluate each "
-                        "criterion, then state REVIEW_PASSED or REVIEW_FAILED."
-                    ),
-                )
-                self._accumulate_usage(total_usage, review_result)
-                self._accumulate_tool_calls(execution_metadata, review_result)
-                review_pass = self._evaluate_review(review_result, memory)
-                review_iterations += review_result.iterations
-                # If still ambiguous after re-prompt, assume pass
-                if review_pass is None:
-                    review_pass = True
-
-            while not review_pass and retry_count < self._max_review_cycles:
-                retry_count += 1
-                logger.info(
-                    f"Review failed for agent {config.agent_id}. "
-                    f"Retry {retry_count}/{self._max_review_cycles}"
-                )
-
-                # Extract review feedback
-                review_feedback = self._extract_review_feedback(review_result, memory)
-
-                # Clear stale review checklist so the LLM generates a fresh one
-                memory.review_checklist = None
-
-                # Re-run Act with review feedback
-                act_result = await self._run_phase(
-                    phase_runner=phase_runner,
-                    phase=Phase.ACT,
-                    node=node,
-                    workflow=workflow,
-                    config=config,
-                    input=input,
-                    context_manager=context_manager,
-                    memory=memory,
-                    on_orchestrator_tool=on_orchestrator_tool,
-                    extra_context=review_feedback,
-                )
-                self._accumulate_usage(total_usage, act_result)
-                self._accumulate_tool_calls(execution_metadata, act_result)
-
-                # Re-run Review
-                review_result = await self._run_phase(
-                    phase_runner=phase_runner,
-                    phase=Phase.REVIEW,
-                    node=node,
-                    workflow=workflow,
-                    config=config,
-                    input=input,
-                    context_manager=context_manager,
-                    memory=memory,
-                    on_orchestrator_tool=on_orchestrator_tool,
-                )
-                self._accumulate_usage(total_usage, review_result)
-                self._accumulate_tool_calls(execution_metadata, review_result)
-
-                review_pass = self._evaluate_review(review_result, memory)
-                review_iterations += review_result.iterations
-                # In retry loop, ambiguous means the LLM still isn't
-                # producing a signal — treat as pass to avoid looping.
-                if review_pass is None:
-                    review_pass = True
-
-                # Plateau detection: stop retrying if quality isn't improving
-                current_fail_count = self._count_review_failures(memory)
-                if not review_pass and current_fail_count >= prev_fail_count:
-                    logger.warning(
-                        f"Review quality not improving for agent {config.agent_id} "
-                        f"(fail count: {current_fail_count} >= {prev_fail_count}). "
-                        f"Stopping retries to avoid wasting tokens."
+            for phase in self._phase_config.phases:
+                if phase == review_phase:
+                    # Review phase with retry loop
+                    last_phase_result = await self._run_review_cycle(
+                        phase_runner=phase_runner,
+                        review_phase=phase,
+                        review_retry_phase=review_retry_phase,
+                        node=node,
+                        workflow=workflow,
+                        config=config,
+                        input=input,
+                        context_manager=context_manager,
+                        memory=memory,
+                        on_orchestrator_tool=on_orchestrator_tool,
+                        execution_metadata=execution_metadata,
+                        total_usage=total_usage,
+                        phases_hitting_limit=phases_hitting_limit,
                     )
-                    break
-                prev_fail_count = current_fail_count
-
-            if not review_pass:
-                logger.warning(
-                    f"Review still failing after {retry_count} retries "
-                    f"for agent {config.agent_id}. Proceeding with current output."
-                )
-
-            execution_metadata.phases_completed.append("review")
-            execution_metadata.iterations_per_phase["review"] = review_iterations
-            execution_metadata.phase_outputs["review"] = review_result.content or ""
-            if review_result.hit_iteration_limit:
-                phases_hitting_limit.append("review")
-            self._persist_phase(review_result, memory)
-
-            # ── Phase 4: Report ──
-            report_result = await self._run_phase(
-                phase_runner=phase_runner,
-                phase=Phase.REPORT,
-                node=node,
-                workflow=workflow,
-                config=config,
-                input=input,
-                context_manager=context_manager,
-                memory=memory,
-                on_orchestrator_tool=on_orchestrator_tool,
-            )
-            self._accumulate_usage(total_usage, report_result)
-            self._accumulate_tool_calls(execution_metadata, report_result)
-            execution_metadata.phases_completed.append("report")
-            execution_metadata.iterations_per_phase["report"] = report_result.iterations
-            execution_metadata.phase_outputs["report"] = report_result.content or ""
-            if report_result.hit_iteration_limit:
-                phases_hitting_limit.append("report")
-            self._persist_phase(report_result, memory)
-
-            # Validate submitted report against output schema (graceful)
-            if memory.submitted_report and input.output_schema:
-                try:
-                    jsonschema_validate(
-                        instance=memory.submitted_report,
-                        schema=input.output_schema,
+                else:
+                    last_phase_result = await self._execute_phase_with_bookkeeping(
+                        phase_runner=phase_runner,
+                        phase=phase,
+                        node=node,
+                        workflow=workflow,
+                        config=config,
+                        input=input,
+                        context_manager=context_manager,
+                        memory=memory,
+                        on_orchestrator_tool=on_orchestrator_tool,
+                        execution_metadata=execution_metadata,
+                        total_usage=total_usage,
+                        phases_hitting_limit=phases_hitting_limit,
                     )
-                except JsonSchemaValidationError as e:
-                    logger.warning(
-                        "Report schema validation failed for agent %s: %s",
-                        config.agent_id, e.message,
+
+            # Use the last phase result (typically Report) for output building
+            report_result = last_phase_result
+
+            # Validate submitted report via pluggable OutputValidator (graceful)
+            if memory.submitted_report:
+                validation = self._output_validator.validate(
+                    output=memory.submitted_report,
+                    schema=input.output_schema,
+                    role=config.role,
+                    sub_role=config.sub_role,
+                )
+                if not validation.is_valid:
+                    for err_msg in validation.errors:
+                        logger.warning(
+                            "Output validation failed for agent %s: %s",
+                            config.agent_id, err_msg,
+                        )
+                        errors.append(ErrorEntry(
+                            source=ErrorSource.SYSTEM,
+                            name="agent_runtime",
+                            error_type="output_validation",
+                            message=err_msg,
+                            recoverable=True,
+                        ))
+                for warn_msg in validation.warnings:
+                    logger.info(
+                        "Output validation warning for agent %s: %s",
+                        config.agent_id, warn_msg,
                     )
                     errors.append(ErrorEntry(
                         source=ErrorSource.SYSTEM,
                         name="agent_runtime",
-                        error_type="output_schema_validation",
-                        message=(
-                            f"Submitted report does not match output_schema: "
-                            f"{e.message}"
-                        ),
+                        error_type="output_validation_warning",
+                        message=warn_msg,
                         recoverable=True,
                     ))
 
@@ -643,7 +570,13 @@ class AgentRuntime:
     def _persist_phase(
         self, phase_result: PhaseResult, memory: AgentWorkingMemory,
     ) -> None:
-        """Persist phase conversation, tool calls, and working memory."""
+        """Persist phase conversation and working memory.
+
+        Tool calls are persisted incrementally during phase execution via
+        the ``on_tool_persisted`` callback on PhaseRunner, so they are NOT
+        re-appended here.  This method only writes the phase conversation
+        summary and the final memory state.
+        """
         if not self._file_store:
             return
         try:
@@ -654,8 +587,6 @@ class AgentRuntime:
                 hit_iteration_limit=phase_result.hit_iteration_limit,
                 tool_calls_made=phase_result.tool_calls_made,
             )
-            if phase_result.tool_calls_made:
-                self._file_store.append_tool_calls(phase_result.tool_calls_made)
             self._file_store.save_memory(memory)
         except Exception as e:
             logger.error(f"Failed to persist phase data: {e}", exc_info=True)
@@ -669,6 +600,198 @@ class AgentRuntime:
             self._file_store.update_agent_status(output.status)
         except Exception as e:
             logger.error(f"Failed to persist agent output: {e}", exc_info=True)
+
+    async def _execute_phase_with_bookkeeping(
+        self,
+        phase_runner: PhaseRunner,
+        phase: Phase,
+        node: AgentNode,
+        workflow: WorkflowExecution,
+        config: AgentConfig,
+        input: AgentInput,
+        context_manager: ContextManager,
+        memory: AgentWorkingMemory,
+        on_orchestrator_tool: Optional[Callable],
+        execution_metadata: ExecutionMetadata,
+        total_usage: TokenUsage,
+        phases_hitting_limit: List[str],
+        extra_context: Optional[str] = None,
+    ) -> PhaseResult:
+        """Run a phase and update all bookkeeping (metadata, usage, persistence)."""
+        result = await self._run_phase(
+            phase_runner=phase_runner,
+            phase=phase,
+            node=node,
+            workflow=workflow,
+            config=config,
+            input=input,
+            context_manager=context_manager,
+            memory=memory,
+            on_orchestrator_tool=on_orchestrator_tool,
+            extra_context=extra_context,
+        )
+        self._accumulate_usage(total_usage, result)
+        self._accumulate_tool_calls(execution_metadata, result)
+        execution_metadata.phases_completed.append(phase.value)
+        execution_metadata.iterations_per_phase[phase.value] = result.iterations
+        execution_metadata.phase_outputs[phase.value] = result.content or ""
+        if result.hit_iteration_limit:
+            phases_hitting_limit.append(phase.value)
+        self._persist_phase(result, memory)
+        return result
+
+    async def _run_review_cycle(
+        self,
+        phase_runner: PhaseRunner,
+        review_phase: Phase,
+        review_retry_phase: Optional[Phase],
+        node: AgentNode,
+        workflow: WorkflowExecution,
+        config: AgentConfig,
+        input: AgentInput,
+        context_manager: ContextManager,
+        memory: AgentWorkingMemory,
+        on_orchestrator_tool: Optional[Callable],
+        execution_metadata: ExecutionMetadata,
+        total_usage: TokenUsage,
+        phases_hitting_limit: List[str],
+    ) -> PhaseResult:
+        """Run the review phase with retry loop.
+
+        If review fails and ``review_retry_phase`` is configured, re-runs the
+        retry phase with review feedback, then re-runs the review phase, up to
+        ``max_review_cycles`` times.
+        """
+        review_result = await self._run_phase(
+            phase_runner=phase_runner,
+            phase=review_phase,
+            node=node,
+            workflow=workflow,
+            config=config,
+            input=input,
+            context_manager=context_manager,
+            memory=memory,
+            on_orchestrator_tool=on_orchestrator_tool,
+        )
+        self._accumulate_usage(total_usage, review_result)
+        self._accumulate_tool_calls(execution_metadata, review_result)
+
+        review_pass = self._evaluate_review(review_result, memory)
+        review_iterations = review_result.iterations
+        retry_count = 0
+        prev_fail_count = self._count_review_failures(memory)
+
+        # If the LLM produced no checklist and no REVIEW_PASSED/FAILED
+        # marker, re-prompt once to get a clear signal before defaulting.
+        if review_pass is None:
+            logger.info(
+                f"Review produced no structured signal for agent "
+                f"{config.agent_id}. Re-prompting for explicit evaluation."
+            )
+            memory.review_checklist = None
+            review_result = await self._run_phase(
+                phase_runner=phase_runner,
+                phase=review_phase,
+                node=node,
+                workflow=workflow,
+                config=config,
+                input=input,
+                context_manager=context_manager,
+                memory=memory,
+                on_orchestrator_tool=on_orchestrator_tool,
+                extra_context=(
+                    "Your previous review did not produce a clear verdict. "
+                    "You MUST use the review_checklist tool to evaluate each "
+                    "criterion, then state REVIEW_PASSED or REVIEW_FAILED."
+                ),
+            )
+            self._accumulate_usage(total_usage, review_result)
+            self._accumulate_tool_calls(execution_metadata, review_result)
+            review_pass = self._evaluate_review(review_result, memory)
+            review_iterations += review_result.iterations
+            # If still ambiguous after re-prompt, assume pass
+            if review_pass is None:
+                review_pass = True
+
+        max_review_cycles = self._phase_config.max_review_cycles
+
+        while not review_pass and retry_count < max_review_cycles:
+            retry_count += 1
+            logger.info(
+                f"Review failed for agent {config.agent_id}. "
+                f"Retry {retry_count}/{max_review_cycles}"
+            )
+
+            # Extract review feedback
+            review_feedback = self._extract_review_feedback(review_result, memory)
+
+            # Clear stale review checklist so the LLM generates a fresh one
+            memory.review_checklist = None
+
+            # Re-run retry phase with review feedback (if configured)
+            if review_retry_phase is not None:
+                retry_result = await self._run_phase(
+                    phase_runner=phase_runner,
+                    phase=review_retry_phase,
+                    node=node,
+                    workflow=workflow,
+                    config=config,
+                    input=input,
+                    context_manager=context_manager,
+                    memory=memory,
+                    on_orchestrator_tool=on_orchestrator_tool,
+                    extra_context=review_feedback,
+                )
+                self._accumulate_usage(total_usage, retry_result)
+                self._accumulate_tool_calls(execution_metadata, retry_result)
+
+            # Re-run review
+            review_result = await self._run_phase(
+                phase_runner=phase_runner,
+                phase=review_phase,
+                node=node,
+                workflow=workflow,
+                config=config,
+                input=input,
+                context_manager=context_manager,
+                memory=memory,
+                on_orchestrator_tool=on_orchestrator_tool,
+            )
+            self._accumulate_usage(total_usage, review_result)
+            self._accumulate_tool_calls(execution_metadata, review_result)
+
+            review_pass = self._evaluate_review(review_result, memory)
+            review_iterations += review_result.iterations
+            # In retry loop, ambiguous means the LLM still isn't
+            # producing a signal — treat as pass to avoid looping.
+            if review_pass is None:
+                review_pass = True
+
+            # Plateau detection: stop retrying if quality isn't improving
+            current_fail_count = self._count_review_failures(memory)
+            if not review_pass and current_fail_count >= prev_fail_count:
+                logger.warning(
+                    f"Review quality not improving for agent {config.agent_id} "
+                    f"(fail count: {current_fail_count} >= {prev_fail_count}). "
+                    f"Stopping retries to avoid wasting tokens."
+                )
+                break
+            prev_fail_count = current_fail_count
+
+        if not review_pass:
+            logger.warning(
+                f"Review still failing after {retry_count} retries "
+                f"for agent {config.agent_id}. Proceeding with current output."
+            )
+
+        execution_metadata.phases_completed.append(review_phase.value)
+        execution_metadata.iterations_per_phase[review_phase.value] = review_iterations
+        execution_metadata.phase_outputs[review_phase.value] = review_result.content or ""
+        if review_result.hit_iteration_limit:
+            phases_hitting_limit.append(review_phase.value)
+        self._persist_phase(review_result, memory)
+
+        return review_result
 
     def _build_tool_registry(
         self,
@@ -708,6 +831,14 @@ class AgentRuntime:
         if can_spawn:
             for tool in build_agent_management_tools(self._available_roles_description):
                 registry.register(tool)
+
+        # Coordination tools (message passing, shared state)
+        for tool in build_coordination_tools():
+            registry.register(tool)
+
+        # Transition tools (set_next_phase — adaptive flow)
+        for tool in build_transition_tools(memory):
+            registry.register(tool)
 
         # Domain tools from input — validate no shadowing of framework tools
         framework_names = set(registry.tool_names)
@@ -862,6 +993,436 @@ class AgentRuntime:
         for tc_info in result.tool_calls_made:
             metadata.tools_called.append(tc_info)
 
+    # -------------------------------------------------------------------
+    # Adaptive flow
+    # -------------------------------------------------------------------
+
+    # Maximum number of phase transitions to prevent infinite loops.
+    # Each phase execution counts as one transition.
+    _MAX_PHASE_TRANSITIONS = 12
+
+    async def _run_adaptive_flow(
+        self,
+        config: AgentConfig,
+        input: AgentInput,
+        node: AgentNode,
+        workflow: WorkflowExecution,
+        memory: AgentWorkingMemory,
+        registry: ToolRegistry,
+        tool_executor: ToolExecutor,
+        context_manager: ContextManager,
+        phase_runner: PhaseRunner,
+        execution_metadata: ExecutionMetadata,
+        total_usage: TokenUsage,
+        errors: List[ErrorEntry],
+        start_time: float,
+        on_orchestrator_tool: Optional[Callable],
+    ) -> AgentOutput:
+        """Agent-controlled adaptive flow with flexible phase transitions.
+
+        Instead of a separate router LLM call, the agent gets ALL tools from
+        the first call and its behavior determines the execution path:
+        - Text-only response → direct answer (1 LLM call)
+        - ``create_todo_list`` called → PLAN phase detected, then ACT → REPORT
+        - Domain tools / ``log_finding`` called → ACT phase detected, then REPORT
+
+        The agent controls phase flow via ``set_next_phase()``. It can:
+        - Go forward: act → review → report (normal)
+        - Go backward: review → act (fix issues), review → plan (revise plan)
+        - Skip: act → report (skip review), review → report (override failed review)
+
+        A phase transition counter prevents infinite loops.
+        """
+        task_id = node.task_id
+        execution_metadata.execution_path = EXECUTION_PATH_ADAPTIVE
+
+        # 1. Build entry messages with all tools visible
+        entry_tools = registry.get_for_entry()
+        entry_messages = context_manager.build_entry_messages(
+            config=config, input=input, all_tools=entry_tools,
+        )
+        tool_schemas = [t.to_llm_schema() for t in entry_tools]
+
+        # 2. Make entry LLM call
+        self._budget_tracker.check_budget(node, workflow)
+        entry_response = await self._llm.chat_with_tools(
+            messages=entry_messages,
+            tools=tool_schemas,
+            model=config.model,
+            model_config=config.model_config,
+            stream=self._stream,
+            on_token=None,
+        )
+
+        # 3. Record usage
+        usage = entry_response.usage or TokenUsage()
+        cost = self._budget_tracker.record_usage(
+            node, workflow, usage, config.model,
+        )
+        total_usage.input_tokens += usage.input_tokens
+        total_usage.output_tokens += usage.output_tokens
+        total_usage.total_cost += cost
+
+        # Persist entry LLM call record for debug UI visibility
+        _entry_tool_calls = None
+        if entry_response.tool_calls:
+            _entry_tool_calls = [
+                {"name": tc.name, "arguments": tc.arguments}
+                for tc in entry_response.tool_calls
+            ]
+        _entry_llm_record = {
+            "phase": "entry",
+            "iteration": 0,
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "response_content": entry_response.content,
+            "tool_calls": _entry_tool_calls,
+            "error": None,
+            "cumulative_tokens": usage.input_tokens + usage.output_tokens,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        if self._file_store:
+            try:
+                self._file_store.append_llm_calls([_entry_llm_record])
+            except Exception:
+                logger.debug(
+                    "Entry LLM call persist failed", exc_info=True,
+                )
+
+        # 4. If no tool calls → direct answer
+        if not entry_response.has_tool_calls():
+            execution_metadata.detected_mode = "direct_answer"
+            output = self._build_adaptive_direct_output(
+                task_id=task_id,
+                config=config,
+                content=entry_response.content or "",
+                total_usage=total_usage,
+                execution_metadata=execution_metadata,
+                errors=errors,
+                start_time=start_time,
+            )
+            node.status = AgentStatus.COMPLETED
+            node.result = output
+            self._persist_output(output)
+            await self._event_bus.publish(agent_completed(
+                workflow_id=workflow.workflow_id,
+                task_id=task_id,
+                agent_id=config.agent_id,
+                summary=output.summary,
+                token_usage={
+                    "input_tokens": total_usage.input_tokens,
+                    "output_tokens": total_usage.output_tokens,
+                },
+            ))
+            return output
+
+        # 5. Execute entry tool calls and accumulate messages
+        messages = list(entry_messages)
+        if entry_response.raw_message:
+            messages.append(entry_response.raw_message)
+
+        entry_tool_records: List[Dict[str, Any]] = []
+        for tc in entry_response.tool_calls:
+            # Check if this is an orchestrator-level tool
+            tool_def = registry.get(tc.name)
+            if tool_def and tool_def.is_orchestrator_tool and on_orchestrator_tool:
+                result = await on_orchestrator_tool(tc)
+            else:
+                result = await tool_executor.execute(tc)
+
+            messages.append(Message(
+                role=MessageRole.TOOL,
+                content=result.content,
+                tool_call_id=tc.id,
+            ))
+            tool_record = {
+                "name": tc.name,
+                "arguments": tc.arguments,
+                "result_content": (result.content or "")[:200],
+                "success": result.success,
+                "phase": "entry",
+            }
+            entry_tool_records.append(tool_record)
+
+            # Incremental persistence for entry tool calls
+            if self._file_store:
+                try:
+                    self._file_store.append_tool_calls([tool_record])
+                    self._file_store.save_memory(memory)
+                except Exception:
+                    logger.debug(
+                        "Incremental persist of entry tool call failed",
+                        exc_info=True,
+                    )
+
+        # 6. Detect phase from tool calls
+        detected_phase = self._detect_entry_phase(entry_response.tool_calls)
+        execution_metadata.detected_mode = (
+            "deep_work" if detected_phase == Phase.PLAN else "light_work"
+        )
+        logger.info(
+            "Adaptive flow: detected %s mode (entry phase: %s) for agent %s",
+            execution_metadata.detected_mode, detected_phase.value,
+            config.agent_id,
+        )
+
+        # 7. Continue detected phase via PhaseRunner
+        phases_hitting_limit: List[str] = []
+
+        phase_result = await phase_runner.run_continuation(
+            phase=detected_phase,
+            node=node,
+            workflow=workflow,
+            config=config,
+            input=input,
+            initial_messages=messages,
+            initial_tool_calls=entry_tool_records,
+            initial_iteration=1,
+            on_orchestrator_tool=on_orchestrator_tool,
+        )
+        self._accumulate_usage(total_usage, phase_result)
+        self._accumulate_tool_calls(execution_metadata, phase_result)
+        execution_metadata.phases_completed.append(detected_phase.value)
+        execution_metadata.iterations_per_phase[detected_phase.value] = (
+            phase_result.iterations
+        )
+        execution_metadata.phase_outputs[detected_phase.value] = (
+            phase_result.content or ""
+        )
+        if phase_result.hit_iteration_limit:
+            phases_hitting_limit.append(detected_phase.value)
+        if phase_result.content:
+            context_manager.record_phase_summary(detected_phase, phase_result.content)
+        self._persist_phase(phase_result, memory)
+
+        # 8. Agent-controlled phase loop
+        # Track phase visit counts for loop prevention
+        phase_visit_counts: Dict[str, int] = {detected_phase.value: 1}
+        transition_count = 1  # entry phase counts as 1
+        current_phase = detected_phase
+
+        # Determine next phase from default flow or agent request
+        def _default_next(current: Phase) -> Phase:
+            """Default forward transition when agent doesn't request a specific phase."""
+            if current == Phase.PLAN:
+                return Phase.ACT
+            if current == Phase.ACT:
+                return Phase.REPORT
+            if current == Phase.REVIEW:
+                return Phase.REPORT
+            return Phase.REPORT  # fallback
+
+        def _resolve_next(current: Phase) -> Phase:
+            """Resolve next phase: agent request takes priority over default."""
+            if memory.requested_next_phase:
+                requested = memory.requested_next_phase
+                memory.requested_next_phase = None  # consume the request
+                phase_map = {
+                    "plan": Phase.PLAN,
+                    "act": Phase.ACT,
+                    "review": Phase.REVIEW,
+                    "report": Phase.REPORT,
+                }
+                return phase_map.get(requested, _default_next(current))
+            return _default_next(current)
+
+        next_phase = _resolve_next(current_phase)
+        last_review_feedback: Optional[str] = None
+
+        while next_phase != Phase.REPORT and transition_count < self._MAX_PHASE_TRANSITIONS:
+            transition_count += 1
+            phase_key = next_phase.value
+            phase_visit_counts[phase_key] = phase_visit_counts.get(phase_key, 0) + 1
+
+            # Loop prevention: max 3 visits per phase
+            if phase_visit_counts[phase_key] > 3:
+                logger.warning(
+                    "Phase %s visited %d times for agent %s — forcing REPORT",
+                    phase_key, phase_visit_counts[phase_key], config.agent_id,
+                )
+                break
+
+            # Run the phase
+            extra_ctx = None
+            if next_phase == Phase.ACT and last_review_feedback:
+                extra_ctx = last_review_feedback
+                last_review_feedback = None
+
+            if next_phase == Phase.REVIEW:
+                # Run review with its own cycle logic
+                review_phase_obj = self._phase_config.effective_review_phase or Phase.REVIEW
+                review_retry_phase = self._phase_config.effective_review_retry_phase
+                review_result = await self._run_review_cycle(
+                    phase_runner=phase_runner,
+                    review_phase=review_phase_obj,
+                    review_retry_phase=review_retry_phase,
+                    node=node,
+                    workflow=workflow,
+                    config=config,
+                    input=input,
+                    context_manager=context_manager,
+                    memory=memory,
+                    on_orchestrator_tool=on_orchestrator_tool,
+                    execution_metadata=execution_metadata,
+                    total_usage=total_usage,
+                    phases_hitting_limit=phases_hitting_limit,
+                )
+                current_phase = Phase.REVIEW
+                # If review failed and agent didn't request a specific next phase,
+                # default to ACT retry with review feedback
+                review_passed = self._evaluate_review(review_result, memory)
+                if not review_passed and not memory.requested_next_phase:
+                    last_review_feedback = self._extract_review_feedback(
+                        review_result, memory,
+                    )
+                    memory.review_checklist = []  # clear for next cycle
+            else:
+                await self._execute_phase_with_bookkeeping(
+                    phase_runner=phase_runner,
+                    phase=next_phase,
+                    node=node,
+                    workflow=workflow,
+                    config=config,
+                    input=input,
+                    context_manager=context_manager,
+                    memory=memory,
+                    on_orchestrator_tool=on_orchestrator_tool,
+                    execution_metadata=execution_metadata,
+                    total_usage=total_usage,
+                    phases_hitting_limit=phases_hitting_limit,
+                    extra_context=extra_ctx,
+                )
+                current_phase = next_phase
+
+            next_phase = _resolve_next(current_phase)
+
+        if transition_count >= self._MAX_PHASE_TRANSITIONS:
+            logger.warning(
+                "Max phase transitions (%d) reached for agent %s — forcing REPORT",
+                self._MAX_PHASE_TRANSITIONS, config.agent_id,
+            )
+
+        # 9. Always run REPORT as the final phase
+        report_result = await self._execute_phase_with_bookkeeping(
+            phase_runner=phase_runner,
+            phase=Phase.REPORT,
+            node=node,
+            workflow=workflow,
+            config=config,
+            input=input,
+            context_manager=context_manager,
+            memory=memory,
+            on_orchestrator_tool=on_orchestrator_tool,
+            execution_metadata=execution_metadata,
+            total_usage=total_usage,
+            phases_hitting_limit=phases_hitting_limit,
+        )
+
+        # 10. Validate output
+        if memory.submitted_report:
+            validation = self._output_validator.validate(
+                output=memory.submitted_report,
+                schema=input.output_schema,
+                role=config.role,
+                sub_role=config.sub_role,
+            )
+            if not validation.is_valid:
+                for err_msg in validation.errors:
+                    logger.warning(
+                        "Output validation failed for agent %s: %s",
+                        config.agent_id, err_msg,
+                    )
+                    errors.append(ErrorEntry(
+                        source=ErrorSource.SYSTEM,
+                        name="agent_runtime",
+                        error_type="output_validation",
+                        message=err_msg,
+                        recoverable=True,
+                    ))
+            for warn_msg in validation.warnings:
+                errors.append(ErrorEntry(
+                    source=ErrorSource.SYSTEM,
+                    name="agent_runtime",
+                    error_type="output_validation_warning",
+                    message=warn_msg,
+                    recoverable=True,
+                ))
+
+        # 11. Build final output
+        output = self._build_output(
+            task_id=task_id,
+            config=config,
+            memory=memory,
+            report_result=report_result,
+            total_usage=total_usage,
+            execution_metadata=execution_metadata,
+            errors=errors,
+            start_time=start_time,
+            node=node,
+            phases_hitting_limit=phases_hitting_limit,
+        )
+
+        node.status = AgentStatus.COMPLETED
+        node.result = output
+        self._persist_output(output)
+
+        await self._event_bus.publish(agent_completed(
+            workflow_id=workflow.workflow_id,
+            task_id=task_id,
+            agent_id=config.agent_id,
+            summary=output.summary,
+            token_usage={
+                "input_tokens": total_usage.input_tokens,
+                "output_tokens": total_usage.output_tokens,
+            },
+        ))
+        return output
+
+    @staticmethod
+    def _detect_entry_phase(tool_calls: List[ToolCall]) -> Phase:
+        """Detect which phase the agent entered based on its entry tool calls.
+
+        - ``create_todo_list`` or ``update_todo_list`` → PLAN
+        - Anything else → ACT
+        """
+        plan_tools = {"create_todo_list", "update_todo_list"}
+        for tc in tool_calls:
+            if tc.name in plan_tools:
+                return Phase.PLAN
+        return Phase.ACT
+
+    def _build_adaptive_direct_output(
+        self,
+        task_id: str,
+        config: AgentConfig,
+        content: str,
+        total_usage: TokenUsage,
+        execution_metadata: ExecutionMetadata,
+        errors: List[ErrorEntry],
+        start_time: float,
+    ) -> AgentOutput:
+        """Build output for adaptive-flow direct answer (text-only, no tools)."""
+        execution_metadata.total_duration_ms = (time.time() - start_time) * 1000
+        execution_metadata.phase_outputs["direct_answer"] = content
+        execution_metadata.tools_called = []
+
+        summary = content.strip()
+        if len(summary) > 500:
+            summary = summary[:500] + "..."
+
+        return AgentOutput(
+            task_id=task_id,
+            agent_id=config.agent_id,
+            role=config.role,
+            sub_role=config.sub_role,
+            status="completed",
+            summary=summary,
+            findings={"direct_answer": content, "answer": content},
+            errors=errors,
+            token_usage=total_usage,
+            execution_metadata=execution_metadata,
+        )
+
     async def _route_execution_path(
         self,
         config: AgentConfig,
@@ -889,16 +1450,21 @@ class AgentRuntime:
             })
             return decision
 
-        if cfg.force_full_workflow_if_output_schema and input.output_schema:
-            decision.update({
-                "reason": "Output schema is required for this task.",
-                "policy_reason": "output_schema_requires_full_workflow",
-            })
-            return decision
+        if input.output_schema:
+            if input.direct_answer_schema_policy is not None:
+                # Per-role policy set → allow the router LLM to decide
+                pass
+            elif cfg.force_full_workflow_if_output_schema:
+                # No per-role policy → use global gate (backward compatible)
+                decision.update({
+                    "reason": "Output schema is required for this task.",
+                    "policy_reason": "output_schema_requires_full_workflow",
+                })
+                return decision
 
         routing_model_config = ModelConfig(
-            temperature=0.0,
-            top_p=1.0,
+            temperature=config.model_config.temperature,
+            top_p=config.model_config.top_p,
             max_tokens=max(96, min(256, cfg.direct_answer_max_tokens)),
         )
         messages = self._build_routing_messages(input)
@@ -970,12 +1536,27 @@ class AgentRuntime:
     ) -> Dict[str, Any]:
         """Attempt direct response without tools; may request escalation."""
         cfg = self._simple_query_bypass
-        model_config = ModelConfig(
-            temperature=min(config.model_config.temperature, 0.3),
-            top_p=config.model_config.top_p,
-            max_tokens=cfg.direct_answer_max_tokens,
+        policy = input.direct_answer_schema_policy
+        use_schema_enforce = (
+            policy == "enforce"
+            and input.output_schema is not None
         )
-        messages = self._build_direct_answer_messages(input)
+
+        max_tokens = cfg.direct_answer_max_tokens
+        if use_schema_enforce:
+            max_tokens = max(max_tokens, 2048)
+
+        model_config = ModelConfig(
+            temperature=config.model_config.temperature,
+            top_p=config.model_config.top_p,
+            max_tokens=max_tokens,
+        )
+
+        if use_schema_enforce:
+            messages = self._build_direct_answer_schema_messages(input)
+        else:
+            messages = self._build_direct_answer_messages(input)
+
         response = await self._call_llm_without_tools(
             messages=messages,
             config=config,
@@ -986,6 +1567,16 @@ class AgentRuntime:
         )
 
         raw_content = (response.content or "").strip()
+
+        if use_schema_enforce:
+            return self._parse_schema_enforced_result(raw_content, cfg, input)
+        else:
+            return self._parse_bypass_result(raw_content, cfg)
+
+    def _parse_bypass_result(
+        self, raw_content: str, cfg: SimpleQueryBypassConfig,
+    ) -> Dict[str, Any]:
+        """Parse direct-answer result in bypass / free-form mode."""
         parsed = self._parse_json_object(raw_content)
 
         answer = ""
@@ -1030,6 +1621,85 @@ class AgentRuntime:
             "escalate_to_full_workflow": escalate,
         }
 
+    def _parse_schema_enforced_result(
+        self,
+        raw_content: str,
+        cfg: SimpleQueryBypassConfig,
+        input: AgentInput,
+    ) -> Dict[str, Any]:
+        """Parse direct-answer result in schema-enforce mode."""
+        parsed = self._parse_json_object(raw_content)
+
+        if not isinstance(parsed, dict):
+            return {
+                "answer": "",
+                "confidence": 0.0,
+                "needs_full_workflow": True,
+                "reason": "Schema-enforced direct answer was not valid JSON.",
+                "parser_status": "invalid_json",
+                "raw_response_preview": raw_content[:300],
+                "escalate_to_full_workflow": cfg.allow_escalation_to_full_workflow,
+            }
+
+        confidence = self._normalize_confidence(parsed.get("confidence", 0.0))
+        needs_full_workflow = self._coerce_bool(
+            parsed.get("needs_full_workflow"), default=False,
+        )
+        reason = str(parsed.get("reason", "")).strip() or "Schema-enforced direct answer."
+
+        schema_output = parsed.get("output")
+        if not isinstance(schema_output, dict):
+            return {
+                "answer": "",
+                "confidence": 0.0,
+                "needs_full_workflow": True,
+                "reason": "Schema-enforced output missing 'output' dict.",
+                "parser_status": "missing_output",
+                "raw_response_preview": raw_content[:300],
+                "escalate_to_full_workflow": cfg.allow_escalation_to_full_workflow,
+            }
+
+        # Validate against output schema if validator available
+        if input.output_schema and self._output_validator:
+            validation = self._output_validator.validate(
+                schema_output, input.output_schema,
+            )
+            if not validation.is_valid:
+                return {
+                    "answer": "",
+                    "confidence": 0.0,
+                    "needs_full_workflow": True,
+                    "reason": (
+                        "Schema validation failed: "
+                        + "; ".join(validation.errors[:3])
+                    ),
+                    "parser_status": "schema_validation_failed",
+                    "raw_response_preview": raw_content[:300],
+                    "escalate_to_full_workflow": cfg.allow_escalation_to_full_workflow,
+                }
+
+        # Extract answer/summary from schema output for the summary field
+        answer = (
+            str(schema_output.get("answer", "")).strip()
+            or str(schema_output.get("summary", "")).strip()
+        )
+
+        escalate = cfg.allow_escalation_to_full_workflow and (
+            needs_full_workflow
+            or confidence < cfg.route_confidence_threshold
+        )
+
+        return {
+            "answer": answer,
+            "confidence": confidence,
+            "needs_full_workflow": needs_full_workflow,
+            "reason": reason,
+            "parser_status": "ok",
+            "raw_response_preview": raw_content[:300],
+            "escalate_to_full_workflow": escalate,
+            "schema_output": schema_output,
+        }
+
     async def _call_llm_without_tools(
         self,
         *,
@@ -1066,18 +1736,36 @@ class AgentRuntime:
             f"Has raw_data: {bool(input.raw_data)}",
             f"RAG results count: {len(input.rag_results or [])}",
             f"Has additional context: {bool(input.additional_context)}",
+        ]
+
+        # Include domain tool descriptions so router can assess tool relevance
+        domain_tools = [t for t in (input.tools or []) if not t.is_framework_tool]
+        if domain_tools:
+            tool_lines = [f"  {t.to_description_text()}" for t in domain_tools]
+            user_payload.append(
+                f"Available domain tools ({len(domain_tools)}):\n"
+                + "\n".join(tool_lines)
+            )
+
+        if input.direct_answer_schema_policy:
+            user_payload.append(
+                f"Direct-answer schema policy: {input.direct_answer_schema_policy}"
+            )
+        user_payload.extend([
             "",
             "Respond with JSON only using this schema:",
             '{"mode":"direct_answer|full_workflow","confidence":0.0,'
             '"reason":"...","requires_external_data":false}',
-        ]
+        ])
         return [
             Message(
                 role=MessageRole.SYSTEM,
                 content=(
                     "You are a routing controller. Decide if a task should be "
-                    "answered directly without tools or run through a full multi-phase workflow. "
-                    "Return JSON only."
+                    "answered directly without tools or run through a full "
+                    "multi-phase workflow. Consider the available domain tools — "
+                    "if any could provide relevant data or functionality for the "
+                    "task, prefer full_workflow. Return JSON only."
                 ),
             ),
             Message(role=MessageRole.USER, content="\n".join(user_payload)),
@@ -1106,6 +1794,41 @@ class AgentRuntime:
                 role=MessageRole.SYSTEM,
                 content=(
                     "Answer the user directly without tools when possible. "
+                    "If context is missing or uncertainty is high, set "
+                    '"needs_full_workflow" to true.'
+                ),
+            ),
+            Message(role=MessageRole.USER, content="\n\n".join(context_parts)),
+        ]
+
+    def _build_direct_answer_schema_messages(self, input: AgentInput) -> List[Message]:
+        """Build prompt for schema-enforced direct-answer mode."""
+        schema_str = json.dumps(input.output_schema, indent=2, ensure_ascii=False)
+
+        context_parts = [f"Task: {input.task}"]
+        if input.additional_context:
+            context_parts.append(
+                f"Additional context:\n{str(input.additional_context)[:1200]}"
+            )
+        if input.raw_data:
+            raw_data_str = json.dumps(input.raw_data, ensure_ascii=False, default=str)
+            context_parts.append(f"raw_data (truncated):\n{raw_data_str[:2000]}")
+        if input.rag_results:
+            rag_preview = json.dumps((input.rag_results or [])[:3], ensure_ascii=False, default=str)
+            context_parts.append(f"rag_results (first 3, truncated):\n{rag_preview[:2000]}")
+
+        context_parts.extend([
+            f"\nOutput schema:\n{schema_str}",
+            "\nRespond with JSON only. Your 'output' field MUST conform to the schema above.",
+            '{"output":{...schema-compliant...},"confidence":0.0,'
+            '"needs_full_workflow":false,"reason":"..."}',
+        ])
+        return [
+            Message(
+                role=MessageRole.SYSTEM,
+                content=(
+                    "Answer the user directly without tools. "
+                    "Your response 'output' field must conform to the provided JSON schema. "
                     "If context is missing or uncertainty is high, set "
                     '"needs_full_workflow" to true.'
                 ),
@@ -1215,15 +1938,27 @@ class AgentRuntime:
                 recoverable=True,
             ))
 
-        summary = answer or reason or "Direct-answer path completed."
+        # Schema-enforced output goes directly into findings (renderable by user-report.js)
+        schema_output = direct_result.get("schema_output")
+        if isinstance(schema_output, dict):
+            findings = schema_output
+            summary = (
+                str(schema_output.get("answer", "")).strip()
+                or str(schema_output.get("summary", "")).strip()
+                or answer
+                or reason
+                or "Direct-answer path completed."
+            )
+        else:
+            summary = answer or reason or "Direct-answer path completed."
+            findings = {
+                "direct_answer": answer,
+                "confidence": confidence,
+                "reason": reason,
+            }
+
         if len(summary) > 500:
             summary = summary[:500] + "..."
-
-        findings: Dict[str, Any] = {
-            "direct_answer": answer,
-            "confidence": confidence,
-            "reason": reason,
-        }
 
         return AgentOutput(
             task_id=task_id,
@@ -1243,7 +1978,7 @@ class AgentRuntime:
         task_id: str,
         config: AgentConfig,
         memory: AgentWorkingMemory,
-        report_result: PhaseResult,
+        report_result: Optional[PhaseResult],
         total_usage: TokenUsage,
         execution_metadata: ExecutionMetadata,
         errors: List[ErrorEntry],
@@ -1258,15 +1993,16 @@ class AgentRuntime:
         if node and node.children:
             execution_metadata.sub_agents_spawned = list(node.children)
 
-        # Use submitted report if available, else use report phase content
+        # Use submitted report if available, else use last phase content
+        report_content = report_result.content if report_result else None
         findings = {}
         if memory.submitted_report:
             findings = memory.submitted_report
-        elif report_result.content:
-            findings = {"report_text": report_result.content}
+        elif report_content:
+            findings = {"report_text": report_content}
 
         # Build summary from findings + report content
-        summary = report_result.content or "Agent completed without producing a text summary."
+        summary = report_content or "Agent completed without producing a text summary."
         if len(summary) > 500:
             summary = summary[:500] + "..."
 

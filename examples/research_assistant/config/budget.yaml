@@ -3,7 +3,7 @@
 budget_defaults:
   max_tokens: 2000000
   max_cost: 50.0
-  max_duration_ms: 600000       # 10 minutes
+  max_duration_ms: 1800000      # 30 minutes
   max_agent_depth: 5
   max_parallel_agents: 5
   max_sub_agents_total: 10
@@ -28,3 +28,7 @@ simple_query_bypass:
   force_full_workflow_if_output_schema: true
   allow_escalation_to_full_workflow: true
   direct_answer_max_tokens: 512
+
+adaptive_flow:
+  enabled: true
+  entry_phase_limit: 3

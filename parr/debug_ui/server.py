@@ -1,8 +1,8 @@
 """
 Debug UI HTTP Server.
 
-Zero-dependency HTTP server that reads session data from the framework's
-persistence directory and serves a single-page debug interface.
+Zero-dependency HTTP server that delegates session data reading to a
+pluggable :class:`UIDataSource` and serves a single-page debug interface.
 """
 
 from __future__ import annotations
@@ -10,468 +10,98 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import queue
 import threading
-from math import ceil
-from functools import partial
+import uuid
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import urlparse
+from socketserver import ThreadingMixIn
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlparse, parse_qs
+
+from .data_source import UIDataSource, FileSystemDataSource
 
 logger = logging.getLogger(__name__)
 
 _HTML_PATH = Path(__file__).parent / "index.html"
+_STATIC_DIR = Path(__file__).parent / "static"
+_MIME_TYPES = {
+    ".css": "text/css; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".html": "text/html; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+}
+
+# Events whose change is visible in the session list sidebar.
+_SESSION_LIST_EVENTS = frozenset({
+    "agent_started", "agent_completed", "agent_failed", "agent_cancelled",
+})
 
 
 # ---------------------------------------------------------------------------
-# Persistence Reader — reads session data from disk
+# SSE Hub — thread-safe manager for Server-Sent Events connections
 # ---------------------------------------------------------------------------
 
-def _read_json(path: Path) -> Any:
-    """Read and parse a JSON file, returning None on failure."""
-    try:
-        if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        logger.warning(f"Failed to read {path}: {e}")
-    return None
+class SSEHub:
+    """Thread-safe manager for SSE client connections.
 
-
-def _json_text(value: Any) -> str:
-    """Serialize arbitrary values to text for lightweight size estimates."""
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    try:
-        return json.dumps(value, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return str(value)
-
-
-def _chars_to_tokens(text_chars: int) -> int:
+    Each connected browser tab gets a bounded ``Queue`` that the
+    ``broadcast`` method pushes lightweight event dicts into.  The SSE
+    endpoint handler reads from the queue and writes to the HTTP response.
     """
-    Approximate token count from text length.
 
-    Uses ~4 chars/token heuristic, which is sufficient for live UI estimates.
-    """
-    if text_chars <= 0:
-        return 0
-    return max(1, ceil(text_chars / 4))
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        # {client_id: (Queue, workflow_filter|None)}
+        self._clients: Dict[str, Tuple[queue.Queue, Optional[str]]] = {}
 
+    def subscribe(self, workflow_id: Optional[str] = None) -> Tuple[str, queue.Queue]:
+        """Register a new SSE client.  Returns ``(client_id, queue)``."""
+        client_id = f"sse-{uuid.uuid4().hex[:12]}"
+        q: queue.Queue = queue.Queue(maxsize=256)
+        with self._lock:
+            self._clients[client_id] = (q, workflow_id)
+        return client_id, q
 
-def _infer_current_phase(conv: Dict[str, Any], status: str) -> Optional[str]:
-    """Infer the active phase from persisted phase snapshots."""
-    phase_order = ["plan", "act", "review", "report"]
-    running_like = status in {"running", "spawned", "queued"}
-    if not conv:
-        return "plan" if running_like else None
+    def unsubscribe(self, client_id: str) -> None:
+        """Remove a disconnected client."""
+        with self._lock:
+            self._clients.pop(client_id, None)
 
-    ordered_present = [p for p in phase_order if p in conv]
-    if not ordered_present:
-        ordered_present = list(conv.keys())
-    if not ordered_present:
-        return "plan" if running_like else None
+    def broadcast(self, event_dict: Dict[str, Any]) -> None:
+        """Push an event into all matching client queues.
 
-    if running_like:
-        for p in phase_order:
-            if p not in conv:
-                return p
-            pdata = conv.get(p) or {}
-            if pdata.get("iterations", 0) > 0 and not pdata.get("content"):
-                return p
-            if pdata.get("hit_iteration_limit", False):
-                return p
+        Clients whose workflow filter does not match are skipped.
+        Full queues silently drop the event (the 30 s polling safety net
+        ensures the UI catches up).
+        """
+        wf_id = event_dict.get("workflow_id")
+        with self._lock:
+            clients = list(self._clients.values())
+        for q, wf_filter in clients:
+            if wf_filter is not None and wf_filter != wf_id:
+                continue
+            try:
+                q.put_nowait(event_dict)
+            except queue.Full:
+                pass  # drop — client will catch up via polling
 
-    return ordered_present[-1]
-
-
-def _estimate_context_metrics(
-    info: Dict[str, Any],
-    conv: Dict[str, Any],
-    tool_calls: List[Dict[str, Any]],
-    output: Dict[str, Any],
-) -> Dict[str, int]:
-    """Estimate prompt/context footprint from persisted task, phases, tools, and outputs."""
-    context_chars = 0
-    output_chars = 0
-
-    task_text = _json_text(info.get("task"))
-    context_chars += len(task_text)
-
-    for phase_data in conv.values():
-        content_text = _json_text((phase_data or {}).get("content"))
-        context_chars += len(content_text)
-        output_chars += len(content_text)
-
-    for tc in tool_calls:
-        args_text = _json_text(tc.get("arguments"))
-        result_text = _json_text(tc.get("result_content") or tc.get("result"))
-        error_text = _json_text(tc.get("error"))
-        context_chars += len(args_text) + len(result_text) + len(error_text)
-        output_chars += len(result_text)
-
-    phase_outputs = ((output.get("execution_metadata") or {}).get("phase_outputs") or {})
-    for v in phase_outputs.values():
-        v_text = _json_text(v)
-        context_chars += len(v_text)
-        output_chars += len(v_text)
-
-    return {
-        "chars": context_chars,
-        "estimated_tokens": _chars_to_tokens(context_chars),
-        "estimated_output_tokens": _chars_to_tokens(output_chars),
-    }
+    @property
+    def client_count(self) -> int:
+        with self._lock:
+            return len(self._clients)
 
 
-def _estimate_todo_metrics(
-    memory: Dict[str, Any],
-    tool_calls: List[Dict[str, Any]],
-) -> Dict[str, Any]:
-    """Compute todo counters; fallback to tool-call signal if memory is not yet persisted."""
-    todo_items = memory.get("todo_list")
-    if isinstance(todo_items, list):
-        total = len(todo_items)
-        completed = sum(1 for item in todo_items if (item or {}).get("completed"))
-        return {
-            "total": total,
-            "completed": completed,
-            "pending": max(0, total - completed),
-            "source": "memory",
-        }
+class SSEEventSink:
+    """``EventSink``-compatible adapter that bridges framework events to :class:`SSEHub`."""
 
-    todo_tools = {
-        "create_todo_list",
-        "update_todo_list",
-        "get_todo_list",
-        "mark_todo_complete",
-        "batch_mark_todo_complete",
-    }
-    seen = [tc for tc in tool_calls if tc.get("name") in todo_tools]
-    return {
-        "total": 0,
-        "completed": 0,
-        "pending": 0,
-        "source": "tools" if seen else "none",
-        "signals": len(seen),
-    }
+    def __init__(self, hub: SSEHub) -> None:
+        self._hub = hub
 
-
-def _derive_activity(
-    *,
-    info: Dict[str, Any],
-    conv: Dict[str, Any],
-    tool_calls: List[Dict[str, Any]],
-    sub_agents: Dict[str, Any],
-    output: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Derive working/waiting state and current action hints for live UI."""
-    raw_status = (info.get("status") or output.get("status") or "unknown")
-    status = str(raw_status).lower()
-    current_phase = _infer_current_phase(conv, status)
-
-    running_children = 0
-    for child in (sub_agents or {}).values():
-        child_status = str(((child.get("info") or {}).get("status") or "")).lower()
-        if child_status in {"running", "spawned", "queued"}:
-            running_children += 1
-
-    last_tool = tool_calls[-1] if tool_calls else {}
-    last_tool_name = last_tool.get("name")
-
-    if status in {"running"}:
-        if running_children and last_tool_name in {"wait_for_agents", "get_agent_results"}:
-            state = "waiting"
-            current_doing = f"waiting for {running_children} sub-agent(s)"
-        elif last_tool_name:
-            state = "working"
-            current_doing = f"calling {last_tool_name}"
-        elif current_phase:
-            state = "working"
-            current_doing = f"executing {current_phase} phase"
-        else:
-            state = "working"
-            current_doing = "initializing"
-    elif status in {"spawned", "queued"}:
-        state = "waiting"
-        current_doing = "queued for execution"
-    elif status in {"completed"}:
-        state = "done"
-        current_doing = "completed"
-    elif status in {"failed", "error", "cancelled"}:
-        state = "failed"
-        current_doing = status
-    else:
-        state = "idle"
-        current_doing = status
-
-    return {
-        "state": state,
-        "status": status,
-        "current_phase": current_phase,
-        "current_doing": current_doing,
-        "last_tool": last_tool_name,
-        "running_children": running_children,
-    }
-
-
-def list_sessions(persist_dir: Path) -> List[Dict[str, Any]]:
-    """List all workflow sessions in the persistence directory."""
-    sessions = []
-    if not persist_dir.exists():
-        return sessions
-    for child in persist_dir.iterdir():
-        if not child.is_dir():
-            continue
-        workflow = _read_json(child / "workflow.json")
-        agent = _read_json(child / "agent.json")
-        task_text = ""
-        if agent:
-            raw_task = agent.get("task", "")
-            task_text = (raw_task[:120] + "...") if len(raw_task) > 120 else raw_task
-        # Prefer workflow status (authoritative) over agent status
-        wf_status = (workflow or {}).get("status")
-        ag_status = agent.get("status") if agent else None
-        effective_status = wf_status or ag_status
-        sessions.append({
-            "workflow_id": child.name,
-            "workflow": workflow,
-            "agent_summary": {
-                "role": agent.get("role") if agent else None,
-                "sub_role": agent.get("sub_role") if agent else None,
-                "status": effective_status,
-                "task": task_text,
-                "model": agent.get("model") if agent else None,
-            },
-        })
-    # Sort by creation time (newest first), falling back to dir name
-    sessions.sort(
-        key=lambda s: (s.get("workflow") or {}).get("created_at", ""),
-        reverse=True,
-    )
-    return sessions
-
-
-def read_agent_tree(agent_dir: Path) -> Dict[str, Any]:
-    """Recursively read an agent and all its sub-agents from disk."""
-    agent: Dict[str, Any] = {}
-
-    agent["info"] = _read_json(agent_dir / "agent.json")
-    agent["conversation"] = _read_json(agent_dir / "conversation.json")
-    agent["tool_calls"] = _read_json(agent_dir / "tool_calls.json")
-    agent["output"] = _read_json(agent_dir / "output.json")
-    agent["sub_agents_summary"] = _read_json(agent_dir / "sub_agents.json")
-
-    # Memory
-    memory_dir = agent_dir / "memory"
-    if memory_dir.exists():
-        memory = {}
-        for f in sorted(memory_dir.iterdir()):
-            if f.suffix == ".json":
-                memory[f.stem] = _read_json(f)
-        agent["memory"] = memory
-    else:
-        agent["memory"] = {}
-
-    # Recursive sub-agents
-    sa_dir = agent_dir / "sub_agents"
-    if sa_dir.exists() and sa_dir.is_dir():
-        children = {}
-        for child_dir in sorted(sa_dir.iterdir()):
-            if child_dir.is_dir():
-                children[child_dir.name] = read_agent_tree(child_dir)
-        agent["sub_agents"] = children
-    else:
-        agent["sub_agents"] = {}
-
-    # Cross-reference sub_agents_summary to fix stale status.
-    # When an agent is killed (e.g. budget exceeded), agent.json may still
-    # say "running" but sub_agents.json on the parent has the real status.
-    sa_summary = agent.get("sub_agents_summary") or []
-    if sa_summary and agent["sub_agents"]:
-        summary_by_id = {}
-        for entry in sa_summary:
-            # Match by task_id (folder name) or agent_id
-            tid = entry.get("task_id", "")
-            aid = entry.get("agent_id", "")
-            summary_by_id[tid] = entry
-            if aid:
-                summary_by_id[aid] = entry
-        for child_key, child in agent["sub_agents"].items():
-            child_info = child.get("info") or {}
-            match = summary_by_id.get(child_key) or summary_by_id.get(child_info.get("task_id", ""))
-            if match and child_info.get("status") == "running" and match.get("status") != "running":
-                child_info["status"] = match["status"]
-
-    # Compute metrics from available data
-    agent["metrics"] = _compute_agent_metrics(agent)
-
-    return agent
-
-
-def _compute_agent_metrics(agent: Dict[str, Any]) -> Dict[str, Any]:
-    """Derive metrics from persisted agent data for the debug UI."""
-    metrics: Dict[str, Any] = {}
-    info = agent.get("info") or {}
-
-    # -- Tool stats --
-    tool_calls = agent.get("tool_calls") or []
-    total_tools = len(tool_calls)
-    tool_ok = sum(1 for tc in tool_calls if tc.get("success") is not False)
-    tool_fail = total_tools - tool_ok
-    tool_names: Dict[str, int] = {}
-    for tc in tool_calls:
-        n = tc.get("name", "unknown")
-        tool_names[n] = tool_names.get(n, 0) + 1
-    metrics["tools"] = {
-        "total": total_tools,
-        "success": tool_ok,
-        "failed": tool_fail,
-        "by_name": tool_names,
-    }
-
-    # -- Phase stats --
-    conv = agent.get("conversation") or {}
-    total_iterations = 0
-    phase_detail = {}
-    for phase_name, phase_data in conv.items():
-        iters = phase_data.get("iterations", 0)
-        tc_count = phase_data.get("tool_calls_count", 0)
-        total_iterations += iters
-        phase_detail[phase_name] = {
-            "iterations": iters,
-            "tool_calls": tc_count,
-            "hit_limit": phase_data.get("hit_iteration_limit", False),
-            "has_content": bool(phase_data.get("content")),
-        }
-    metrics["phases"] = {
-        "completed": list(conv.keys()),
-        "total_iterations": total_iterations,
-        "detail": phase_detail,
-    }
-
-    # -- Token / context / cost / duration --
-    output = agent.get("output") or {}
-    token_usage = output.get("token_usage") or {}
-    exec_meta = output.get("execution_metadata") or {}
-    context = _estimate_context_metrics(info, conv, tool_calls, output)
-
-    input_tokens = int(token_usage.get("input_tokens") or 0)
-    output_tokens = int(token_usage.get("output_tokens") or 0)
-    total_tokens = int(token_usage.get("total_tokens") or (input_tokens + output_tokens))
-    estimated = False
-    if total_tokens <= 0:
-        # No final usage yet (running agent): provide a live estimate.
-        estimated = True
-        output_tokens = context.get("estimated_output_tokens", 0)
-        # Approximate prompt/context tokens as a function of current context.
-        input_tokens = max(context.get("estimated_tokens", 0), output_tokens // 2)
-        total_tokens = input_tokens + output_tokens
-
-    metrics["tokens"] = {
-        "input": input_tokens,
-        "output": output_tokens,
-        "total": total_tokens,
-        "cost": float(token_usage.get("total_cost", 0) or 0),
-        "is_estimated": estimated,
-    }
-    metrics["context"] = {
-        "chars": context.get("chars", 0),
-        "estimated_tokens": context.get("estimated_tokens", 0),
-    }
-    metrics["duration_ms"] = exec_meta.get("total_duration_ms", 0)
-    metrics["iterations_per_phase"] = exec_meta.get("iterations_per_phase") or {}
-
-    # -- Sub-agent count --
-    subs = agent.get("sub_agents") or {}
-    sub_summary = agent.get("sub_agents_summary") or []
-    metrics["sub_agents"] = {
-        "count": max(len(subs), len(sub_summary)),
-        "ids": list(subs.keys()),
-    }
-    metrics["todo"] = _estimate_todo_metrics(agent.get("memory") or {}, tool_calls)
-    metrics["activity"] = _derive_activity(
-        info=info,
-        conv=conv,
-        tool_calls=tool_calls,
-        sub_agents=subs,
-        output=output,
-    )
-
-    return metrics
-
-
-def _aggregate_metrics(agent: Dict[str, Any]) -> Dict[str, Any]:
-    """Recursively aggregate metrics across an agent and all sub-agents."""
-    m = agent.get("metrics") or {}
-    tokens = dict(m.get("tokens") or {"input": 0, "output": 0, "total": 0, "cost": 0})
-    tools = dict(m.get("tools") or {"total": 0, "success": 0, "failed": 0})
-    context = dict(m.get("context") or {"chars": 0, "estimated_tokens": 0})
-    activity_state = ((m.get("activity") or {}).get("state") or "idle")
-    agent_states = {
-        "working": 1 if activity_state == "working" else 0,
-        "waiting": 1 if activity_state == "waiting" else 0,
-        "done": 1 if activity_state == "done" else 0,
-        "failed": 1 if activity_state == "failed" else 0,
-        "idle": 1 if activity_state == "idle" else 0,
-    }
-    total_iterations = (m.get("phases") or {}).get("total_iterations", 0)
-    duration_ms = m.get("duration_ms", 0)
-    agent_count = 1
-
-    for _id, child in (agent.get("sub_agents") or {}).items():
-        child_agg = _aggregate_metrics(child)
-        tokens["input"] += child_agg["tokens"]["input"]
-        tokens["output"] += child_agg["tokens"]["output"]
-        tokens["total"] += child_agg["tokens"]["total"]
-        tokens["cost"] += child_agg["tokens"]["cost"]
-        tools["total"] += child_agg["tools"]["total"]
-        tools["success"] += child_agg["tools"]["success"]
-        tools["failed"] += child_agg["tools"]["failed"]
-        context["chars"] += child_agg["context"]["chars"]
-        context["estimated_tokens"] += child_agg["context"]["estimated_tokens"]
-        for key in agent_states:
-            agent_states[key] += child_agg["agent_states"].get(key, 0)
-        total_iterations += child_agg["total_iterations"]
-        duration_ms = max(duration_ms, child_agg["duration_ms"])
-        agent_count += child_agg["agent_count"]
-
-    return {
-        "tokens": tokens,
-        "tools": tools,
-        "context": context,
-        "agent_states": agent_states,
-        "total_iterations": total_iterations,
-        "duration_ms": duration_ms,
-        "agent_count": agent_count,
-    }
-
-
-def read_session(persist_dir: Path, workflow_id: str) -> Optional[Dict[str, Any]]:
-    """Read full session data for a workflow."""
-    wf_dir = persist_dir / workflow_id
-    if not wf_dir.exists():
-        return None
-
-    agent_tree = read_agent_tree(wf_dir)
-    workflow = _read_json(wf_dir / "workflow.json")
-
-    # Build global aggregated metrics
-    global_metrics = _aggregate_metrics(agent_tree)
-    # Attach budget info from workflow.json for progress bars
-    budget_cfg = (workflow or {}).get("budget") or (workflow or {}).get("budget_config") or {}
-    global_metrics["budget_limits"] = {
-        "max_tokens": budget_cfg.get("max_tokens", 0),
-        "max_cost": budget_cfg.get("max_cost", 0),
-        "max_tool_calls": budget_cfg.get("max_tool_calls", 0),
-    }
-
-    return {
-        "workflow_id": workflow_id,
-        "workflow": workflow,
-        "agent_tree": agent_tree,
-        "global_metrics": global_metrics,
-    }
+    async def emit(self, event: Dict[str, Any]) -> None:
+        self._hub.broadcast(event)
 
 
 # ---------------------------------------------------------------------------
@@ -481,8 +111,15 @@ def read_session(persist_dir: Path, workflow_id: str) -> Optional[Dict[str, Any]
 class _WorkflowRunner:
     """Runs async workflow functions in a background thread with its own event loop."""
 
-    def __init__(self, runner_func: Callable) -> None:
+    def __init__(
+        self,
+        runner_func: Callable,
+        cancel_func: Optional[Callable] = None,
+        continue_func: Optional[Callable] = None,
+    ) -> None:
         self._runner = runner_func
+        self._cancel_func = cancel_func
+        self._continue_func = continue_func
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
@@ -497,11 +134,45 @@ class _WorkflowRunner:
             self._safe_run(task, role), self._loop,
         )
 
+    def start_with_context(self, task: str, role: str, additional_context: str) -> None:
+        """Schedule a workflow with additional_context (fire-and-forget)."""
+        if not self._continue_func:
+            raise ValueError("No continue_func configured")
+        asyncio.run_coroutine_threadsafe(
+            self._safe_continue(task, role, additional_context), self._loop,
+        )
+
+    def cancel(self, workflow_id: str) -> bool:
+        """Cancel a running workflow. Returns True on success."""
+        if not self._cancel_func:
+            return False
+        future = asyncio.run_coroutine_threadsafe(
+            self._safe_cancel(workflow_id), self._loop,
+        )
+        try:
+            future.result(timeout=10.0)
+            return True
+        except Exception:
+            return False
+
     async def _safe_run(self, task: str, role: str) -> None:
         try:
             await self._runner(task, role)
         except Exception as e:
             logger.error(f"Workflow runner failed: {e}", exc_info=True)
+
+    async def _safe_continue(self, task: str, role: str, additional_context: str) -> None:
+        try:
+            await self._continue_func(task, role, additional_context)
+        except Exception as e:
+            logger.error(f"Workflow continue failed: {e}", exc_info=True)
+
+    async def _safe_cancel(self, workflow_id: str) -> None:
+        try:
+            await self._cancel_func(workflow_id)
+        except Exception as e:
+            logger.error(f"Workflow cancel failed: {e}", exc_info=True)
+            raise
 
 
 # ---------------------------------------------------------------------------
@@ -512,9 +183,20 @@ class _DebugHandler(BaseHTTPRequestHandler):
     """Routes requests to the debug UI and API endpoints."""
 
     # Injected via server class
-    persist_dir: Path
+    data_source: UIDataSource
     workflow_runner: Optional[_WorkflowRunner] = None
     available_roles: List[str] = []
+    sse_hub: Optional[SSEHub] = None
+    role_details: List[Dict] = []
+    tool_details: List[Dict] = []
+    budget_config: Dict = {}
+
+    def handle(self) -> None:
+        """Wrap default handle to suppress broken-pipe / connection-aborted."""
+        try:
+            super().handle()
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            pass  # Client disconnected — normal during SSE or page refresh
 
     def log_message(self, fmt: str, *args: Any) -> None:
         logger.debug(fmt, *args)
@@ -556,6 +238,20 @@ class _DebugHandler(BaseHTTPRequestHandler):
                 self._send_error_json(400, "Missing workflow_id")
         elif path == "/api/config":
             self._api_get_config()
+        elif path == "/api/config/export":
+            self._api_config_export()
+        elif path == "/api/roles":
+            self._api_list_roles()
+        elif path.startswith("/api/roles/"):
+            self._api_get_role(path[len("/api/roles/"):])
+        elif path == "/api/tools":
+            self._api_list_tools()
+        elif path == "/api/budget":
+            self._api_get_budget()
+        elif path == "/api/events":
+            self._api_sse_stream(parsed.query)
+        elif path.startswith("/static/"):
+            self._serve_static(path[len("/static/"):])
         else:
             self._send_error_json(404, "Not found")
 
@@ -565,6 +261,12 @@ class _DebugHandler(BaseHTTPRequestHandler):
 
         if path == "/api/sessions":
             self._api_start_session()
+        elif path.startswith("/api/sessions/") and path.endswith("/cancel"):
+            wf_id = path[len("/api/sessions/"):-len("/cancel")]
+            self._api_cancel_session(wf_id)
+        elif path.startswith("/api/sessions/") and path.endswith("/continue"):
+            wf_id = path[len("/api/sessions/"):-len("/continue")]
+            self._api_continue_session(wf_id)
         else:
             self._send_error_json(404, "Not found")
 
@@ -577,12 +279,33 @@ class _DebugHandler(BaseHTTPRequestHandler):
         except FileNotFoundError:
             self._send_error_json(500, "index.html not found")
 
+    def _serve_static(self, rel_path: str) -> None:
+        """Serve a file from the static directory with path traversal protection."""
+        try:
+            target = (_STATIC_DIR / rel_path).resolve()
+            if not str(target).startswith(str(_STATIC_DIR.resolve())):
+                self._send_error_json(403, "Forbidden")
+                return
+            if not target.is_file():
+                self._send_error_json(404, "Not found")
+                return
+            content_type = _MIME_TYPES.get(target.suffix, "application/octet-stream")
+            body = target.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(body)
+        except (FileNotFoundError, OSError):
+            self._send_error_json(404, "Not found")
+
     def _api_list_sessions(self) -> None:
-        sessions = list_sessions(self.persist_dir)
+        sessions = self.data_source.list_sessions()
         self._send_json(sessions)
 
     def _api_get_session(self, workflow_id: str) -> None:
-        data = read_session(self.persist_dir, workflow_id)
+        data = self.data_source.get_session(workflow_id)
         if data is None:
             self._send_error_json(404, f"Session '{workflow_id}' not found")
         else:
@@ -591,8 +314,121 @@ class _DebugHandler(BaseHTTPRequestHandler):
     def _api_get_config(self) -> None:
         self._send_json({
             "can_start": self.workflow_runner is not None,
+            "can_cancel": (
+                self.workflow_runner is not None
+                and self.workflow_runner._cancel_func is not None
+            ),
+            "can_continue": (
+                self.workflow_runner is not None
+                and self.workflow_runner._continue_func is not None
+            ),
             "available_roles": self.available_roles,
+            "sse_available": self.sse_hub is not None,
         })
+
+    # -- Management APIs ----------------------------------------------------
+
+    def _api_cancel_session(self, workflow_id: str) -> None:
+        if self.workflow_runner is None:
+            self._send_error_json(400, "No workflow_runner configured")
+            return
+        if not workflow_id:
+            self._send_error_json(400, "Missing workflow_id")
+            return
+        try:
+            success = self.workflow_runner.cancel(workflow_id)
+            if success:
+                self._send_json({"status": "cancelled", "workflow_id": workflow_id})
+            else:
+                self._send_error_json(400, "Cancellation not available")
+        except Exception as e:
+            self._send_error_json(500, f"Cancel failed: {e}")
+
+    def _api_list_roles(self) -> None:
+        self._send_json(self.role_details)
+
+    def _api_get_role(self, name: str) -> None:
+        if not name:
+            self._send_error_json(400, "Missing role name")
+            return
+        for role in self.role_details:
+            if role["name"] == name:
+                self._send_json(role)
+                return
+        self._send_error_json(404, f"Role '{name}' not found")
+
+    def _api_list_tools(self) -> None:
+        self._send_json(self.tool_details)
+
+    def _api_get_budget(self) -> None:
+        self._send_json(self.budget_config)
+
+    def _api_config_export(self) -> None:
+        self._send_json({
+            "roles": self.role_details,
+            "tools": self.tool_details,
+            "budget": self.budget_config,
+            "available_roles": self.available_roles,
+            "sse_available": self.sse_hub is not None,
+        })
+
+    # -- SSE Stream ---------------------------------------------------------
+
+    def _sse_write(self, event_name: str, data: str) -> None:
+        """Write a single SSE frame to the response."""
+        self.wfile.write(f"event: {event_name}\ndata: {data}\n\n".encode("utf-8"))
+        self.wfile.flush()
+
+    def _api_sse_stream(self, query_string: str) -> None:
+        """Hold the connection open and push events via Server-Sent Events."""
+        if self.sse_hub is None:
+            self._send_error_json(503, "SSE not available (no event_bus)")
+            return
+
+        # Optional workflow_id filter from query string
+        params = parse_qs(query_string)
+        wf_filter = params.get("workflow_id", [None])[0]
+
+        client_id, q = self.sse_hub.subscribe(workflow_id=wf_filter)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+
+            # Initial connected event
+            self._sse_write("connected", json.dumps({"client_id": client_id}))
+
+            while True:
+                try:
+                    event_dict = q.get(timeout=30)
+                except queue.Empty:
+                    # Keepalive comment (SSE spec: lines starting with ':')
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    continue
+
+                event_type = event_dict.get("event_type", "")
+                payload = json.dumps({
+                    "workflow_id": event_dict.get("workflow_id", ""),
+                    "event_type": event_type,
+                    "task_id": event_dict.get("task_id", ""),
+                    "timestamp": event_dict.get("timestamp", ""),
+                }, ensure_ascii=False)
+
+                # Always send session_update (detail view may need refresh)
+                self._sse_write("session_update", payload)
+
+                # Lifecycle events also affect the session list sidebar
+                if event_type in _SESSION_LIST_EVENTS:
+                    self._sse_write("session_list", payload)
+
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            pass  # client disconnected
+        finally:
+            self.sse_hub.unsubscribe(client_id)
 
     def _api_start_session(self) -> None:
         if self.workflow_runner is None:
@@ -619,6 +455,136 @@ class _DebugHandler(BaseHTTPRequestHandler):
         self.workflow_runner.start(task, role)
         self._send_json({"status": "started", "task": task, "role": role})
 
+    def _api_continue_session(self, workflow_id: str) -> None:
+        """Continue a completed session with a follow-up message."""
+        if self.workflow_runner is None:
+            self._send_error_json(400, "No workflow_runner configured")
+            return
+        if not self.workflow_runner._continue_func:
+            self._send_error_json(400, "Continue not available")
+            return
+        if not workflow_id:
+            self._send_error_json(400, "Missing workflow_id")
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+        except (json.JSONDecodeError, ValueError):
+            self._send_error_json(400, "Invalid JSON body")
+            return
+
+        message = body.get("message", "").strip()
+        if not message:
+            self._send_error_json(400, "'message' is required")
+            return
+
+        # Read previous session to extract role and output
+        data = self.data_source.get_session(workflow_id)
+        if not data:
+            self._send_error_json(404, f"Session '{workflow_id}' not found")
+            return
+
+        tree = data.get("agent_tree") or {}
+        info = tree.get("info") or {}
+        output = tree.get("output") or {}
+        memory = tree.get("memory") or {}
+        sub_agents = tree.get("sub_agents") or {}
+
+        role = info.get("role", "").strip()
+        if not role:
+            self._send_error_json(400, "Cannot determine role from previous session")
+            return
+
+        # Build additional_context from previous session output
+        additional_context = _build_continue_context(info, output, memory, sub_agents)
+
+        self.workflow_runner.start_with_context(message, role, additional_context)
+        self._send_json({
+            "status": "started",
+            "task": message,
+            "role": role,
+            "continued_from": workflow_id,
+        })
+
+
+def _build_continue_context(info: Dict, output: Dict,
+                            memory: Optional[Dict] = None,
+                            sub_agents: Optional[Dict] = None) -> str:
+    """Build an additional_context string from a previous session's data."""
+    original_task = info.get("task", "")
+    summary = output.get("summary") or ""
+    report = output.get("submitted_report")
+    # Findings come from memory (a list), not output (a dict).
+    memory = memory or {}
+    findings = memory.get("findings") or []
+    if not isinstance(findings, list):
+        findings = []
+
+    parts = [f"## Previous Session Context\n\nOriginal task: {original_task}"]
+    if summary:
+        parts.append(f"\nPrevious result summary:\n{summary}")
+    if report:
+        report_text = (
+            report if isinstance(report, str)
+            else json.dumps(report, ensure_ascii=False, indent=2)
+        )
+        # Truncate very long reports to keep context manageable
+        if len(report_text) > 4000:
+            report_text = report_text[:4000] + "\n... (truncated)"
+        parts.append(f"\nPrevious report:\n{report_text}")
+    if findings:
+        findings_lines = []
+        for f in findings[:20]:  # cap at 20 findings
+            title = (f.get("category", "") or f.get("title", "")
+                     or f.get("content", "") or str(f))
+            findings_lines.append(f"- {title}")
+        parts.append(f"\nPrevious findings:\n" + "\n".join(findings_lines))
+
+    # Include sub-agent results so retries don't re-do completed work
+    if sub_agents:
+        sa_parts = []
+        for sa_id, sa_data in sub_agents.items():
+            sa_info = sa_data.get("info") or {}
+            sa_output = sa_data.get("output") or {}
+            sa_role = sa_info.get("role", sa_id)
+            sa_task = sa_info.get("task", "")
+            sa_status = sa_info.get("status", "unknown")
+            sa_report = sa_output.get("submitted_report")
+            sa_summary = sa_output.get("summary", "")
+
+            sa_section = f"\n### Sub-agent: {sa_role} (status: {sa_status})\nTask: {sa_task}"
+            if sa_summary:
+                sa_section += f"\nSummary: {sa_summary}"
+            if sa_report:
+                report_text = (sa_report if isinstance(sa_report, str)
+                              else json.dumps(sa_report, ensure_ascii=False, indent=2))
+                if len(report_text) > 2000:
+                    report_text = report_text[:2000] + "\n... (truncated)"
+                sa_section += f"\nReport:\n{report_text}"
+            sa_parts.append(sa_section)
+
+        if sa_parts:
+            parts.append("\n## Completed Sub-Agent Results\n"
+                        "The following sub-agents already completed their work. "
+                        "DO NOT re-spawn them \u2014 use their results directly.\n"
+                        + "\n".join(sa_parts))
+
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Threading Server
+# ---------------------------------------------------------------------------
+
+class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    """HTTPServer that handles each request in a new thread.
+
+    Required for SSE: long-lived SSE connections must not block
+    normal REST API requests.
+    """
+    daemon_threads = True
+
 
 # ---------------------------------------------------------------------------
 # Debug Server
@@ -628,8 +594,8 @@ class DebugServer:
     """
     Lightweight HTTP server for inspecting PARR framework sessions.
 
-    Reads session data from the persistence directory and serves a
-    browser-based debug interface.
+    Delegates session data reading to a :class:`UIDataSource` and serves
+    a browser-based debug interface.
     """
 
     def __init__(
@@ -639,14 +605,31 @@ class DebugServer:
         port: int = 8080,
         workflow_runner: Optional[Callable] = None,
         available_roles: Optional[List[str]] = None,
+        cancel_func: Optional[Callable] = None,
+        continue_func: Optional[Callable] = None,
+        role_details: Optional[List[Dict]] = None,
+        tool_details: Optional[List[Dict]] = None,
+        budget_config: Optional[Dict] = None,
+        sse_hub: Optional[SSEHub] = None,
+        data_source: Optional[UIDataSource] = None,
     ) -> None:
         self.persist_dir = Path(persist_dir).resolve()
         self.host = host
         self.port = port
         self._workflow_runner = (
-            _WorkflowRunner(workflow_runner) if workflow_runner else None
+            _WorkflowRunner(
+                workflow_runner,
+                cancel_func=cancel_func,
+                continue_func=continue_func,
+            )
+            if workflow_runner else None
         )
         self._available_roles = available_roles or []
+        self._role_details = role_details or []
+        self._tool_details = tool_details or []
+        self._budget_config = budget_config or {}
+        self._sse_hub = sse_hub
+        self._data_source = data_source or FileSystemDataSource(self.persist_dir)
 
         # Ensure persist_dir exists
         self.persist_dir.mkdir(parents=True, exist_ok=True)
@@ -656,12 +639,16 @@ class DebugServer:
             "_BoundHandler",
             (_DebugHandler,),
             {
-                "persist_dir": self.persist_dir,
+                "data_source": self._data_source,
                 "workflow_runner": self._workflow_runner,
                 "available_roles": self._available_roles,
+                "role_details": self._role_details,
+                "tool_details": self._tool_details,
+                "budget_config": self._budget_config,
+                "sse_hub": self._sse_hub,
             },
         )
-        self._server = HTTPServer((host, port), handler)
+        self._server = _ThreadingHTTPServer((host, port), handler)
 
     def start(self) -> None:
         """Start the debug server (blocking)."""
@@ -672,6 +659,10 @@ class DebugServer:
             print(f"Workflow launching: enabled ({len(self._available_roles)} roles)")
         else:
             print("Workflow launching: disabled (no workflow_runner provided)")
+        if self._sse_hub:
+            print("SSE live events: enabled")
+        else:
+            print("SSE live events: disabled (no event_bus)")
         print("Press Ctrl+C to stop.\n")
         try:
             self._server.serve_forever()
@@ -690,6 +681,13 @@ def start_server(
     port: int = 8080,
     workflow_runner: Optional[Callable] = None,
     available_roles: Optional[List[str]] = None,
+    cancel_func: Optional[Callable] = None,
+    continue_func: Optional[Callable] = None,
+    role_details: Optional[List[Dict]] = None,
+    tool_details: Optional[List[Dict]] = None,
+    budget_config: Optional[Dict] = None,
+    sse_hub: Optional[SSEHub] = None,
+    data_source: Optional[UIDataSource] = None,
 ) -> None:
     """
     Start the PARR Debug UI server (blocking).
@@ -702,6 +700,16 @@ def start_server(
             for starting workflows from the UI.
         available_roles: Role names shown in the UI dropdown when
             workflow_runner is provided.
+        cancel_func: Optional async callable to cancel a workflow by ID.
+        continue_func: Optional async callable
+            ``(task, role, additional_context) -> AgentOutput`` for continuing
+            a completed session with a follow-up message.
+        role_details: Pre-serialized role details for the management API.
+        tool_details: Pre-serialized tool details for the management API.
+        budget_config: Pre-serialized budget config for the management API.
+        sse_hub: Optional :class:`SSEHub` for real-time event push via SSE.
+        data_source: Optional :class:`UIDataSource` for reading session data.
+            Defaults to :class:`FileSystemDataSource` using ``persist_dir``.
     """
     server = DebugServer(
         persist_dir=persist_dir,
@@ -709,5 +717,12 @@ def start_server(
         port=port,
         workflow_runner=workflow_runner,
         available_roles=available_roles,
+        cancel_func=cancel_func,
+        continue_func=continue_func,
+        role_details=role_details,
+        tool_details=tool_details,
+        budget_config=budget_config,
+        sse_hub=sse_hub,
+        data_source=data_source,
     )
     server.start()

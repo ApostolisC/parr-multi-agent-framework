@@ -6,15 +6,20 @@ models:
     output_price_per_1k: 0.008
     context_window: 1000000
 
-  gpt-4o-mini:
-    input_price_per_1k: 0.00015
-    output_price_per_1k: 0.0006
+  gpt-4.1-mini:
+    input_price_per_1k: 0.0004
+    output_price_per_1k: 0.0016
     context_window: 128000
 
   claude-3-5-sonnet:
     input_price_per_1k: 0.003
     output_price_per_1k: 0.015
     context_window: 200000
+
+  gpt-5.3-chat:
+    input_price_per_1k: 0.00175
+    output_price_per_1k: 0.014
+    context_window: 250000
 
   claude-3-haiku:
     input_price_per_1k: 0.00025

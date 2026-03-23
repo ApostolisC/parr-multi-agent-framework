@@ -23,6 +23,16 @@ With workflow launching::
     )
 """
 
-from .server import start_server, DebugServer
+from .dashboard import PARRDashboard
+from .data_source import UIDataSource, FileSystemDataSource
+from .server import start_server, DebugServer, SSEHub, SSEEventSink
 
-__all__ = ["start_server", "DebugServer"]
+__all__ = [
+    "PARRDashboard",
+    "start_server",
+    "DebugServer",
+    "SSEHub",
+    "SSEEventSink",
+    "UIDataSource",
+    "FileSystemDataSource",
+]

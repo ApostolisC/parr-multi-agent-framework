@@ -90,6 +90,7 @@ def validate_config(
     llm_rate_limit: Optional[Dict[str, Any]],
     tool_names: List[str],
     simple_query_bypass: Optional[Dict[str, Any]] = None,
+    adaptive_flow: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """
     Validate all config cross-references and required fields.
@@ -102,6 +103,7 @@ def validate_config(
         phase_limits: Parsed phase_limits dict from budget.yaml.
         llm_rate_limit: Parsed llm_rate_limit dict from budget.yaml.
         simple_query_bypass: Parsed simple_query_bypass dict from budget.yaml.
+        adaptive_flow: Parsed adaptive_flow dict from budget.yaml.
         tool_names: List of available tool names from the tool registry.
 
     Returns:
@@ -131,6 +133,7 @@ def validate_config(
     _validate_budget(budget, errors)
     _validate_llm_rate_limit(llm_rate_limit or {}, errors)
     _validate_simple_query_bypass(simple_query_bypass or {}, errors)
+    _validate_adaptive_flow(adaptive_flow or {}, errors)
 
     # -- Validate each role --------------------------------------------------
     for role_name, role_def in roles.items():
@@ -187,6 +190,14 @@ def validate_config(
         if mc:
             _validate_model_config(mc, ctx, errors)
 
+        # Validate direct_answer_schema_policy if present
+        da_policy = role_def.get("direct_answer_schema_policy")
+        if da_policy is not None and da_policy not in ("enforce", "bypass"):
+            errors.append(
+                f"{ctx} 'direct_answer_schema_policy' must be 'enforce' or "
+                f"'bypass', got {da_policy!r}"
+            )
+
         # -- Validate sub-roles ----------------------------------------------
         for sr_name, sr_def in role_def.get("sub_roles", {}).items():
             sr_ctx = f"Sub-role '{role_name}/{sr_name}'"
@@ -235,6 +246,14 @@ def validate_config(
             sr_mc = sr_def.get("model_config")
             if sr_mc:
                 _validate_model_config(sr_mc, sr_ctx, errors)
+
+            # direct_answer_schema_policy override
+            sr_da_policy = sr_def.get("direct_answer_schema_policy")
+            if sr_da_policy is not None and sr_da_policy not in ("enforce", "bypass"):
+                errors.append(
+                    f"{sr_ctx} 'direct_answer_schema_policy' must be 'enforce' "
+                    f"or 'bypass', got {sr_da_policy!r}"
+                )
 
     return errors
 
@@ -428,6 +447,29 @@ def _validate_simple_query_bypass(raw: Dict[str, Any], errors: List[str]) -> Non
         )
 
 
+def _validate_adaptive_flow(raw: Dict[str, Any], errors: List[str]) -> None:
+    """Validate adaptive_flow section in budget.yaml."""
+    if not raw:
+        return
+
+    ctx = "adaptive_flow"
+    if not isinstance(raw, dict):
+        errors.append(f"{ctx} must be a mapping/object, got {type(raw).__name__}")
+        return
+
+    enabled = raw.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        errors.append(f"{ctx}.enabled must be a boolean, got {enabled!r}")
+
+    entry_limit = raw.get("entry_phase_limit")
+    if entry_limit is not None and (
+        not isinstance(entry_limit, int) or entry_limit < 1
+    ):
+        errors.append(
+            f"{ctx}.entry_phase_limit must be a positive integer, got {entry_limit!r}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Tools config validation
 # ---------------------------------------------------------------------------
@@ -488,6 +530,20 @@ def validate_tools_config(
                         errors.append(
                             f"{ctx} references unknown phase '{p}'. "
                             f"Valid phases: {', '.join(sorted(valid_phases))}"
+                        )
+
+        # Optional: phase_visibility
+        vis_phases = tool_def.get("phase_visibility")
+        if vis_phases is not None:
+            if not isinstance(vis_phases, list):
+                errors.append(f"{ctx} 'phase_visibility' must be a list")
+            else:
+                for p in vis_phases:
+                    if p not in valid_phases:
+                        errors.append(
+                            f"{ctx} references unknown phase '{p}' in "
+                            f"phase_visibility. Valid phases: "
+                            f"{', '.join(sorted(valid_phases))}"
                         )
 
         # Optional: timeout_ms

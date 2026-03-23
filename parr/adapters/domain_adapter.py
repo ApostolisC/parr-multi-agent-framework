@@ -63,6 +63,7 @@ class SubRoleEntry:
     tools_override: Optional[List[ToolDef]] = None
     output_schema_override: Optional[Dict[str, Any]] = None
     report_template_override: Optional[str] = None
+    direct_answer_schema_policy_override: Optional[str] = None
 
 
 @dataclass
@@ -74,6 +75,7 @@ class RoleEntry:
     report_template: Optional[str] = None
     description: str = ""
     sub_roles: Dict[str, SubRoleEntry] = field(default_factory=dict)
+    direct_answer_schema_policy: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +105,7 @@ class ReferenceDomainAdapter:
         output_schema: Optional[Dict[str, Any]] = None,
         report_template: Optional[str] = None,
         description: str = "",
+        direct_answer_schema_policy: Optional[str] = None,
     ) -> None:
         """
         Register a role with the adapter.
@@ -114,6 +117,8 @@ class ReferenceDomainAdapter:
             output_schema: JSON Schema for the role's report output.
             report_template: Formatting instructions for the report phase.
             description: Human-readable description (shown in spawn_agent tool).
+            direct_answer_schema_policy: ``"enforce"`` or ``"bypass"`` for
+                direct-answer schema handling; ``None`` uses global config.
         """
         if role in self._roles:
             raise ValueError(f"Role '{role}' is already registered")
@@ -124,6 +129,7 @@ class ReferenceDomainAdapter:
             output_schema=output_schema,
             report_template=report_template,
             description=description,
+            direct_answer_schema_policy=direct_answer_schema_policy,
         )
         logger.debug(f"Registered role: {role}")
 
@@ -136,6 +142,7 @@ class ReferenceDomainAdapter:
         tools_override: Optional[List[ToolDef]] = None,
         output_schema_override: Optional[Dict[str, Any]] = None,
         report_template_override: Optional[str] = None,
+        direct_answer_schema_policy_override: Optional[str] = None,
     ) -> None:
         """
         Register a sub-role under an existing role.
@@ -151,6 +158,8 @@ class ReferenceDomainAdapter:
             tools_override: If set, replaces the parent's tool list entirely.
             output_schema_override: If set, replaces the parent's output schema.
             report_template_override: If set, replaces the parent's report template.
+            direct_answer_schema_policy_override: If set, overrides the parent's
+                direct-answer schema policy.
         """
         entry = self._roles.get(role)
         if entry is None:
@@ -164,6 +173,7 @@ class ReferenceDomainAdapter:
             tools_override=tools_override,
             output_schema_override=output_schema_override,
             report_template_override=report_template_override,
+            direct_answer_schema_policy_override=direct_answer_schema_policy_override,
         )
         logger.debug(f"Registered sub-role: {role}/{sub_role}")
 
@@ -238,6 +248,24 @@ class ReferenceDomainAdapter:
             if sr.report_template_override is not None:
                 return sr.report_template_override
         return entry.report_template
+
+    def get_direct_answer_schema_policy(
+        self, role: str, sub_role: Optional[str] = None
+    ) -> Optional[str]:
+        """Get the direct-answer schema policy for a role.
+
+        Returns ``"enforce"``, ``"bypass"``, or ``None`` (use global config).
+        Sub-role override takes precedence when present.
+        """
+        entry = self._roles.get(role)
+        if entry is None:
+            return None
+
+        if sub_role and sub_role in entry.sub_roles:
+            sr = entry.sub_roles[sub_role]
+            if sr.direct_answer_schema_policy_override is not None:
+                return sr.direct_answer_schema_policy_override
+        return entry.direct_answer_schema_policy
 
     def list_available_roles(self) -> List[Dict[str, Any]]:
         """List all registered roles for the spawn_agent tool description."""
