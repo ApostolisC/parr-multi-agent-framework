@@ -43,6 +43,7 @@ from .core_types import (
     BudgetConfig,
     BudgetUsage,
     CostConfig,
+    EffortLevel,
     ErrorEntry,
     ErrorSource,
     ExecutionMetadata,
@@ -139,6 +140,8 @@ class Orchestrator:
         rag_results: Optional[List[Dict[str, Any]]] = None,
         additional_context: Optional[str] = None,
         budget: Optional[BudgetConfig] = None,
+        effort_level: Optional[int] = None,
+        workflow_id: Optional[str] = None,
     ) -> AgentOutput:
         """
         Start a new workflow with a root agent.
@@ -173,6 +176,13 @@ class Orchestrator:
 
         workflow_budget = budget or self._default_budget
 
+        # Store workflow-level effort for sub-agent inheritance
+        self._workflow_effort_level = effort_level
+        logger.info(
+            "[PARR] start_workflow: effort_level=%s (stored as _workflow_effort_level)",
+            effort_level,
+        )
+
         # Resolve config from adapter if available
         config = self._resolve_agent_config(role, sub_role, system_prompt, model, model_config)
 
@@ -185,10 +195,12 @@ class Orchestrator:
         if output_schema is None and self._domain_adapter:
             output_schema = self._domain_adapter.get_output_schema(role, sub_role)
 
-        # Create workflow
-        workflow = WorkflowExecution(
-            global_budget=workflow_budget,
-        )
+        # Create workflow (use caller-provided ID if given, to keep
+        # persistence and external tracking in sync)
+        wf_kwargs: Dict[str, Any] = {"global_budget": workflow_budget}
+        if workflow_id:
+            wf_kwargs["workflow_id"] = workflow_id
+        workflow = WorkflowExecution(**wf_kwargs)
         self._workflows[workflow.workflow_id] = workflow
 
         # Create trace store for this workflow
@@ -246,6 +258,7 @@ class Orchestrator:
                         status="running",
                         depth=0,
                         model=config.model,
+                        effort_level=effort_level,
                     )
                     wf_store.save_workflow_info(
                         workflow_id=workflow.workflow_id,
@@ -270,6 +283,15 @@ class Orchestrator:
                 task_description=task[:200],
             ))
 
+            # Auto-inject domain context for the root agent
+            if self._domain_adapter and hasattr(self._domain_adapter, 'get_initial_context'):
+                try:
+                    adapter_context = self._domain_adapter.get_initial_context(role, sub_role)
+                    if adapter_context:
+                        raw_data = {**(raw_data or {}), **adapter_context}
+                except Exception as e:
+                    logger.warning("Failed to get initial context from adapter: %s", e)
+
             # Build agent input
             agent_input = AgentInput(
                 task=task,
@@ -280,6 +302,7 @@ class Orchestrator:
                 additional_context=additional_context,
                 budget=workflow_budget,
                 trace_snapshot=trace_store.get_snapshot(root_node.task_id),
+                effort_level=effort_level,
             )
 
             # Build report template handler from adapter
@@ -299,6 +322,7 @@ class Orchestrator:
                 simple_query_bypass=self._simple_query_bypass,
                 budget_config=workflow_budget,
                 agent_file_store=root_store,
+                effort_level=effort_level,
             )
 
             # Execute with orchestrator tool handling
@@ -579,15 +603,67 @@ class Orchestrator:
         ))
         trace_store.add_child(parent_node.task_id, child_node.task_id)
 
+        # Effort level resolution order:
+        # 1. LLM's explicit effort_level in spawn_agent args (capped at parent)
+        # 2. Domain adapter's default_effort for the child's role/sub_role
+        # 3. Inherit parent's effort level (except Level 0 is never inherited)
+        parent_effort = getattr(self, "_workflow_effort_level", None)
+        child_effort_raw = args.get("effort_level")
+        if child_effort_raw is not None:
+            child_effort = int(child_effort_raw)
+            # Cap: children cannot exceed the workflow's effort level
+            if parent_effort is not None and child_effort > parent_effort:
+                child_effort = parent_effort
+        else:
+            # Check domain adapter for role-specific default
+            adapter_default = None
+            if self._domain_adapter and hasattr(self._domain_adapter, "get_default_effort"):
+                try:
+                    adapter_default = self._domain_adapter.get_default_effort(role, sub_role)
+                except Exception:
+                    pass
+            if adapter_default is not None:
+                child_effort = int(adapter_default)
+                if parent_effort is not None and child_effort > parent_effort:
+                    child_effort = parent_effort
+            elif parent_effort is not None and parent_effort != EffortLevel.MINIMAL:
+                # Level 0 is internal-only — never inherited automatically.
+                child_effort = parent_effort
+            else:
+                child_effort = None
+
+        logger.info(
+            "[PARR] _handle_spawn_agent: child_effort=%s (raw=%s, parent_effort=%s, capped=%s) for role=%s/%s",
+            child_effort, child_effort_raw, parent_effort,
+            child_effort_raw is not None and int(child_effort_raw) != child_effort,
+            args.get("role"), args.get("sub_role"),
+        )
+
+        # review_mode lets the parent agent control how strictly the child
+        # is reviewed: "thorough" (default), "lenient", or "skip".
+        # When effort_level is provided it takes precedence over review_mode.
+        child_review_mode = args.get("review_mode", "thorough")
+
+        # Auto-inject domain context for spawned agents
+        child_raw_data = args.get("raw_data") or {}
+        if self._domain_adapter and hasattr(self._domain_adapter, 'get_initial_context'):
+            try:
+                adapter_context = self._domain_adapter.get_initial_context(role, sub_role)
+                if adapter_context:
+                    child_raw_data = {**child_raw_data, **adapter_context}
+            except Exception as e:
+                logger.warning("Failed to get initial context for child agent: %s", e)
+
         # Build child input
         child_input = AgentInput(
             task=task_description,
             tools=child_tools,
             output_schema=child_schema,
-            raw_data=args.get("raw_data"),
+            raw_data=child_raw_data or None,
             additional_context=args.get("additional_context"),
             budget=child_budget,
             trace_snapshot=trace_store.get_snapshot(child_node.task_id),
+            effort_level=child_effort,
         )
 
         # Sub-agents get limited review cycles to avoid costly retry loops.
@@ -616,6 +692,7 @@ class Orchestrator:
                     depth=child_node.depth,
                     parent_task_id=parent_node.task_id,
                     model=child_config.model,
+                    effort_level=child_effort,
                 )
                 # Register child in parent's sub_agents.json
                 parent_store = wf_store.get_store(parent_node.task_id)
@@ -643,6 +720,8 @@ class Orchestrator:
             simple_query_bypass=self._simple_query_bypass,
             budget_config=child_budget,
             agent_file_store=child_file_store,
+            review_mode=child_review_mode,
+            effort_level=child_effort,
         )
 
         # Launch child execution as a background task so the parent can

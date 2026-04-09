@@ -34,11 +34,13 @@ from .event_types import (
     agent_failed,
     agent_started,
     phase_completed,
+    review_override,
 )
 from .framework_tools import (
     AgentWorkingMemory,
     build_act_tools,
     build_agent_management_tools,
+    build_collection_tools,
     build_plan_tools,
     build_report_tools,
     build_review_tools,
@@ -54,6 +56,7 @@ from .core_types import (
     AgentOutput,
     AgentStatus,
     BudgetConfig,
+    EffortLevel,
     ErrorEntry,
     ErrorSource,
     ExecutionMetadata,
@@ -61,6 +64,7 @@ from .core_types import (
     MessageRole,
     ModelConfig,
     Phase,
+    ReviewMode,
     SimpleQueryBypassConfig,
     StallDetectionConfig,
     ToolCall,
@@ -69,6 +73,7 @@ from .core_types import (
     TokenUsage,
     WorkflowExecution,
     generate_id,
+    get_effort_spec,
 )
 from .protocols import ToolCallingLLM
 
@@ -90,6 +95,16 @@ class AgentRuntime:
         output = await runtime.execute(config, input, node, workflow)
     """
 
+    # Valid review_mode values (legacy — kept for backward compat)
+    REVIEW_MODES = ("thorough", "lenient", "skip")
+
+    # Map legacy review_mode strings to the new ReviewMode enum
+    _LEGACY_REVIEW_MAP = {
+        "thorough": ReviewMode.STRICT,
+        "lenient": ReviewMode.LENIENT,
+        "skip": ReviewMode.NONE,
+    }
+
     def __init__(
         self,
         llm: ToolCallingLLM,
@@ -104,11 +119,12 @@ class AgentRuntime:
         simple_query_bypass: Optional[SimpleQueryBypassConfig] = None,
         budget_config: Optional[BudgetConfig] = None,
         agent_file_store: Optional[AgentFileStore] = None,
+        review_mode: str = "thorough",
+        effort_level: Optional[int] = None,
     ) -> None:
         self._llm = llm
         self._budget_tracker = budget_tracker
         self._event_bus = event_bus
-        self._max_review_cycles = max_review_cycles
         self._phase_limits = phase_limits
         self._available_roles_description = available_roles_description
         self._report_template_handler = report_template_handler
@@ -117,6 +133,37 @@ class AgentRuntime:
         self._simple_query_bypass = simple_query_bypass or SimpleQueryBypassConfig()
         self._budget_config = budget_config
         self._file_store = agent_file_store
+
+        # Derive phase pipeline from effort_level when provided;
+        # otherwise fall back to the legacy review_mode parameter
+        # for full backward compatibility.
+        if effort_level is not None:
+            phases, review_mode_enum, max_retries = get_effort_spec(effort_level)
+            self._effort_level = effort_level
+            self._active_phases = phases
+            self._review_mode_enum = review_mode_enum
+            self._max_review_cycles = max_retries
+            logger.info(
+                "[PARR] AgentRuntime: effort_level=%d → phases=%s",
+                effort_level, [p.value for p in phases],
+            )
+        else:
+            self._effort_level = None
+            self._active_phases = list(Phase)  # all four
+            self._review_mode_enum = self._LEGACY_REVIEW_MAP.get(
+                review_mode if review_mode in self.REVIEW_MODES else "thorough",
+                ReviewMode.STRICT,
+            )
+            self._max_review_cycles = max_review_cycles
+            logger.info(
+                "[PARR] AgentRuntime: effort_level=None → legacy mode, all phases, review_mode=%s",
+                review_mode,
+            )
+
+        # Keep legacy field for any code that reads it directly
+        self._review_mode = (
+            review_mode if review_mode in self.REVIEW_MODES else "thorough"
+        )
 
     async def execute(
         self,
@@ -169,6 +216,7 @@ class AgentRuntime:
             phase_limits=self._phase_limits,
             stream=self._stream,
             stall_config=self._stall_config,
+            file_store=self._file_store,
         )
 
         # Emit agent started
@@ -240,28 +288,41 @@ class AgentRuntime:
                     ))
                     return output
 
-            # ── Phase 1: Plan ──
-            plan_result = await self._run_phase(
-                phase_runner=phase_runner,
-                phase=Phase.PLAN,
-                node=node,
-                workflow=workflow,
-                config=config,
-                input=input,
-                context_manager=context_manager,
-                memory=memory,
-                on_orchestrator_tool=on_orchestrator_tool,
-            )
-            self._accumulate_usage(total_usage, plan_result)
-            self._accumulate_tool_calls(execution_metadata, plan_result)
-            execution_metadata.phases_completed.append("plan")
-            execution_metadata.iterations_per_phase["plan"] = plan_result.iterations
-            execution_metadata.phase_outputs["plan"] = plan_result.content or ""
-            if plan_result.hit_iteration_limit:
-                phases_hitting_limit.append("plan")
-            self._persist_phase(plan_result, memory)
+            # ── Build phase pipeline from effort level ──
+            active_phases = self._active_phases
+            review_mode = self._review_mode_enum
+            plan_result = None
+            act_result = None
+            review_result = None
+            review_pass = None
+            report_result = None
 
-            # ── Phase 2: Act ──
+            # ── Plan ──
+            if Phase.PLAN in active_phases:
+                plan_result = await self._run_phase(
+                    phase_runner=phase_runner,
+                    phase=Phase.PLAN,
+                    node=node,
+                    workflow=workflow,
+                    config=config,
+                    input=input,
+                    context_manager=context_manager,
+                    memory=memory,
+                    on_orchestrator_tool=on_orchestrator_tool,
+                )
+                self._accumulate_usage(total_usage, plan_result)
+                self._accumulate_tool_calls(execution_metadata, plan_result)
+                execution_metadata.phases_completed.append("plan")
+                execution_metadata.iterations_per_phase["plan"] = plan_result.iterations
+                execution_metadata.phase_outputs["plan"] = plan_result.content or ""
+                if plan_result.hit_iteration_limit:
+                    phases_hitting_limit.append("plan")
+                self._persist_phase(plan_result, memory)
+
+            # ── Act ──
+            act_phase_ctx = None
+            if plan_result:
+                act_phase_ctx = f"Plan completed ({plan_result.iterations} iterations)"
             act_result = await self._run_phase(
                 phase_runner=phase_runner,
                 phase=Phase.ACT,
@@ -272,6 +333,7 @@ class AgentRuntime:
                 context_manager=context_manager,
                 memory=memory,
                 on_orchestrator_tool=on_orchestrator_tool,
+                phase_context=act_phase_ctx,
             )
             self._accumulate_usage(total_usage, act_result)
             self._accumulate_tool_calls(execution_metadata, act_result)
@@ -282,34 +344,17 @@ class AgentRuntime:
                 phases_hitting_limit.append("act")
             self._persist_phase(act_result, memory)
 
-            # ── Phase 3: Review (with retry loop) ──
-            review_result = await self._run_phase(
-                phase_runner=phase_runner,
-                phase=Phase.REVIEW,
-                node=node,
-                workflow=workflow,
-                config=config,
-                input=input,
-                context_manager=context_manager,
-                memory=memory,
-                on_orchestrator_tool=on_orchestrator_tool,
-            )
-            self._accumulate_usage(total_usage, review_result)
-            self._accumulate_tool_calls(execution_metadata, review_result)
+            # ── Review (with optional retry loop) ──
+            if Phase.REVIEW in active_phases and review_mode != ReviewMode.NONE:
+                lenient = review_mode == ReviewMode.LENIENT
 
-            review_pass = self._evaluate_review(review_result, memory)
-            review_iterations = review_result.iterations
-            retry_count = 0
-            prev_fail_count = self._count_review_failures(memory)
-
-            # If the LLM produced no checklist and no REVIEW_PASSED/FAILED
-            # marker, re-prompt once to get a clear signal before defaulting.
-            if review_pass is None:
-                logger.info(
-                    f"Review produced no structured signal for agent "
-                    f"{config.agent_id}. Re-prompting for explicit evaluation."
+                n_findings = len(memory.findings)
+                todo_items = memory.todo_list or []
+                n_done = sum(1 for t in todo_items if getattr(t, "completed", False))
+                review_ctx = (
+                    f"Execution completed ({act_result.iterations} iterations). "
+                    f"{n_findings} findings, {n_done}/{len(todo_items)} tasks done."
                 )
-                memory.review_checklist = None
                 review_result = await self._run_phase(
                     phase_runner=phase_runner,
                     phase=Phase.REVIEW,
@@ -320,145 +365,215 @@ class AgentRuntime:
                     context_manager=context_manager,
                     memory=memory,
                     on_orchestrator_tool=on_orchestrator_tool,
-                    extra_context=(
-                        "Your previous review did not produce a clear verdict. "
-                        "You MUST use the review_checklist tool to evaluate each "
-                        "criterion, then state REVIEW_PASSED or REVIEW_FAILED."
-                    ),
-                )
-                self._accumulate_usage(total_usage, review_result)
-                self._accumulate_tool_calls(execution_metadata, review_result)
-                review_pass = self._evaluate_review(review_result, memory)
-                review_iterations += review_result.iterations
-                # If still ambiguous after re-prompt, assume pass
-                if review_pass is None:
-                    review_pass = True
-
-            while not review_pass and retry_count < self._max_review_cycles:
-                retry_count += 1
-                logger.info(
-                    f"Review failed for agent {config.agent_id}. "
-                    f"Retry {retry_count}/{self._max_review_cycles}"
-                )
-
-                # Extract review feedback
-                review_feedback = self._extract_review_feedback(review_result, memory)
-
-                # Clear stale review checklist so the LLM generates a fresh one
-                memory.review_checklist = None
-
-                # Re-run Act with review feedback
-                act_result = await self._run_phase(
-                    phase_runner=phase_runner,
-                    phase=Phase.ACT,
-                    node=node,
-                    workflow=workflow,
-                    config=config,
-                    input=input,
-                    context_manager=context_manager,
-                    memory=memory,
-                    on_orchestrator_tool=on_orchestrator_tool,
-                    extra_context=review_feedback,
-                )
-                self._accumulate_usage(total_usage, act_result)
-                self._accumulate_tool_calls(execution_metadata, act_result)
-
-                # Re-run Review
-                review_result = await self._run_phase(
-                    phase_runner=phase_runner,
-                    phase=Phase.REVIEW,
-                    node=node,
-                    workflow=workflow,
-                    config=config,
-                    input=input,
-                    context_manager=context_manager,
-                    memory=memory,
-                    on_orchestrator_tool=on_orchestrator_tool,
+                    phase_context=review_ctx,
                 )
                 self._accumulate_usage(total_usage, review_result)
                 self._accumulate_tool_calls(execution_metadata, review_result)
 
-                review_pass = self._evaluate_review(review_result, memory)
-                review_iterations += review_result.iterations
-                # In retry loop, ambiguous means the LLM still isn't
-                # producing a signal — treat as pass to avoid looping.
-                if review_pass is None:
-                    review_pass = True
-
-                # Plateau detection: stop retrying if quality isn't improving
-                current_fail_count = self._count_review_failures(memory)
-                if not review_pass and current_fail_count >= prev_fail_count:
-                    logger.warning(
-                        f"Review quality not improving for agent {config.agent_id} "
-                        f"(fail count: {current_fail_count} >= {prev_fail_count}). "
-                        f"Stopping retries to avoid wasting tokens."
-                    )
-                    break
-                prev_fail_count = current_fail_count
-
-            if not review_pass:
-                logger.warning(
-                    f"Review still failing after {retry_count} retries "
-                    f"for agent {config.agent_id}. Proceeding with current output."
+                review_pass = self._evaluate_review(
+                    review_result, memory, lenient=lenient,
                 )
+                review_iterations = review_result.iterations
+                retry_count = 0
+                prev_fail_count = self._count_review_failures(memory, lenient=lenient)
 
-            execution_metadata.phases_completed.append("review")
-            execution_metadata.iterations_per_phase["review"] = review_iterations
-            execution_metadata.phase_outputs["review"] = review_result.content or ""
-            if review_result.hit_iteration_limit:
-                phases_hitting_limit.append("review")
-            self._persist_phase(review_result, memory)
-
-            # ── Phase 4: Report ──
-            report_result = await self._run_phase(
-                phase_runner=phase_runner,
-                phase=Phase.REPORT,
-                node=node,
-                workflow=workflow,
-                config=config,
-                input=input,
-                context_manager=context_manager,
-                memory=memory,
-                on_orchestrator_tool=on_orchestrator_tool,
-            )
-            self._accumulate_usage(total_usage, report_result)
-            self._accumulate_tool_calls(execution_metadata, report_result)
-            execution_metadata.phases_completed.append("report")
-            execution_metadata.iterations_per_phase["report"] = report_result.iterations
-            execution_metadata.phase_outputs["report"] = report_result.content or ""
-            if report_result.hit_iteration_limit:
-                phases_hitting_limit.append("report")
-            self._persist_phase(report_result, memory)
-
-            # Validate submitted report against output schema (graceful)
-            if memory.submitted_report and input.output_schema:
-                try:
-                    jsonschema_validate(
-                        instance=memory.submitted_report,
-                        schema=input.output_schema,
+                # If the LLM produced no checklist and no REVIEW_PASSED/FAILED
+                # marker, re-prompt once to get a clear signal before defaulting.
+                if review_pass is None:
+                    logger.info(
+                        f"Review produced no structured signal for agent "
+                        f"{config.agent_id}. Re-prompting for explicit evaluation."
                     )
-                except JsonSchemaValidationError as e:
-                    logger.warning(
-                        "Report schema validation failed for agent %s: %s",
-                        config.agent_id, e.message,
-                    )
-                    errors.append(ErrorEntry(
-                        source=ErrorSource.SYSTEM,
-                        name="agent_runtime",
-                        error_type="output_schema_validation",
-                        message=(
-                            f"Submitted report does not match output_schema: "
-                            f"{e.message}"
+                    memory.review_checklist = None
+                    review_result = await self._run_phase(
+                        phase_runner=phase_runner,
+                        phase=Phase.REVIEW,
+                        node=node,
+                        workflow=workflow,
+                        config=config,
+                        input=input,
+                        context_manager=context_manager,
+                        memory=memory,
+                        on_orchestrator_tool=on_orchestrator_tool,
+                        extra_context=(
+                            "Your previous review did not produce a clear verdict. "
+                            "You MUST use the review_checklist tool to evaluate each "
+                            "criterion, then state REVIEW_PASSED or REVIEW_FAILED."
                         ),
-                        recoverable=True,
-                    ))
+                    )
+                    self._accumulate_usage(total_usage, review_result)
+                    self._accumulate_tool_calls(execution_metadata, review_result)
+                    review_pass = self._evaluate_review(
+                        review_result, memory, lenient=lenient,
+                    )
+                    review_iterations += review_result.iterations
+                    # If still ambiguous after re-prompt, assume pass
+                    if review_pass is None:
+                        review_pass = True
 
-            # Build output from submitted report or phase content
+                while not review_pass and retry_count < self._max_review_cycles:
+                    retry_count += 1
+                    logger.info(
+                        f"Review failed for agent {config.agent_id}. "
+                        f"Retry {retry_count}/{self._max_review_cycles}"
+                    )
+
+                    # Extract review feedback
+                    review_feedback = self._extract_review_feedback(review_result, memory)
+
+                    # Clear stale review checklist so the LLM generates a fresh one
+                    memory.review_checklist = None
+
+                    # Re-run Act with review feedback
+                    act_result = await self._run_phase(
+                        phase_runner=phase_runner,
+                        phase=Phase.ACT,
+                        node=node,
+                        workflow=workflow,
+                        config=config,
+                        input=input,
+                        context_manager=context_manager,
+                        memory=memory,
+                        on_orchestrator_tool=on_orchestrator_tool,
+                        extra_context=review_feedback,
+                    )
+                    self._accumulate_usage(total_usage, act_result)
+                    self._accumulate_tool_calls(execution_metadata, act_result)
+
+                    # Re-run Review
+                    review_result = await self._run_phase(
+                        phase_runner=phase_runner,
+                        phase=Phase.REVIEW,
+                        node=node,
+                        workflow=workflow,
+                        config=config,
+                        input=input,
+                        context_manager=context_manager,
+                        memory=memory,
+                        on_orchestrator_tool=on_orchestrator_tool,
+                    )
+                    self._accumulate_usage(total_usage, review_result)
+                    self._accumulate_tool_calls(execution_metadata, review_result)
+
+                    review_pass = self._evaluate_review(
+                        review_result, memory, lenient=lenient,
+                    )
+                    review_iterations += review_result.iterations
+                    # In retry loop, ambiguous means the LLM still isn't
+                    # producing a signal — treat as pass to avoid looping.
+                    if review_pass is None:
+                        review_pass = True
+
+                    # Plateau detection: stop retrying if quality isn't improving
+                    current_fail_count = self._count_review_failures(
+                        memory, lenient=lenient,
+                    )
+                    if not review_pass and current_fail_count >= prev_fail_count:
+                        logger.warning(
+                            f"Review quality not improving for agent {config.agent_id} "
+                            f"(fail count: {current_fail_count} >= {prev_fail_count}). "
+                            f"Stopping retries to avoid wasting tokens."
+                        )
+                        break
+                    prev_fail_count = current_fail_count
+
+                if not review_pass:
+                    # Build human-readable reason and failed criteria for the event
+                    _failed_items = []
+                    _reason = "Max review retries reached"
+                    blocking = ("fail",) if lenient else ("fail", "partial")
+                    if memory.review_checklist:
+                        _failed_items = [
+                            {"criterion": item.criterion, "rating": item.rating,
+                             "justification": item.justification}
+                            for item in memory.review_checklist
+                            if item.rating in blocking
+                        ]
+                        pass_count = sum(1 for i in memory.review_checklist if i.rating == "pass")
+                        total = len(memory.review_checklist)
+                        _reason = (
+                            f"Review passed {pass_count}/{total} criteria after "
+                            f"{retry_count} retries. Proceeding with best-effort output."
+                        )
+                    await self._event_bus.publish(review_override(
+                        workflow_id=workflow.workflow_id,
+                        task_id=node.task_id,
+                        agent_id=node.agent_id,
+                        retry_count=retry_count,
+                        reason=_reason,
+                        failed_criteria=_failed_items,
+                    ))
+                    logger.warning(
+                        f"Review still failing after {retry_count} retries "
+                        f"for agent {config.agent_id}. Proceeding with current output."
+                    )
+
+                execution_metadata.phases_completed.append("review")
+                execution_metadata.iterations_per_phase["review"] = review_iterations
+                execution_metadata.phase_outputs["review"] = review_result.content or ""
+                if review_result.hit_iteration_limit:
+                    phases_hitting_limit.append("review")
+                self._persist_phase(review_result, memory)
+
+            # ── Report ──
+            if Phase.REPORT in active_phases:
+                if review_result is None:
+                    report_ctx = "Review skipped"
+                elif review_pass:
+                    report_ctx = "Review passed"
+                else:
+                    report_ctx = f"Review overridden ({review_mode.value} mode)"
+                report_result = await self._run_phase(
+                    phase_runner=phase_runner,
+                    phase=Phase.REPORT,
+                    node=node,
+                    workflow=workflow,
+                    config=config,
+                    input=input,
+                    context_manager=context_manager,
+                    memory=memory,
+                    on_orchestrator_tool=on_orchestrator_tool,
+                    phase_context=report_ctx,
+                )
+                self._accumulate_usage(total_usage, report_result)
+                self._accumulate_tool_calls(execution_metadata, report_result)
+                execution_metadata.phases_completed.append("report")
+                execution_metadata.iterations_per_phase["report"] = report_result.iterations
+                execution_metadata.phase_outputs["report"] = report_result.content or ""
+                if report_result.hit_iteration_limit:
+                    phases_hitting_limit.append("report")
+                self._persist_phase(report_result, memory)
+
+                # Validate submitted report against output schema (graceful)
+                if memory.submitted_report and input.output_schema:
+                    try:
+                        jsonschema_validate(
+                            instance=memory.submitted_report,
+                            schema=input.output_schema,
+                        )
+                    except JsonSchemaValidationError as e:
+                        logger.warning(
+                            "Report schema validation failed for agent %s: %s",
+                            config.agent_id, e.message,
+                        )
+                        errors.append(ErrorEntry(
+                            source=ErrorSource.SYSTEM,
+                            name="agent_runtime",
+                            error_type="output_schema_validation",
+                            message=(
+                                f"Submitted report does not match output_schema: "
+                                f"{e.message}"
+                            ),
+                            recoverable=True,
+                        ))
+
+            # Build output — use report if available, else last phase result
+            last_result = report_result or act_result
             output = self._build_output(
                 task_id=task_id,
                 config=config,
                 memory=memory,
-                report_result=report_result,
+                report_result=last_result,
                 total_usage=total_usage,
                 execution_metadata=execution_metadata,
                 errors=errors,
@@ -695,6 +810,8 @@ class AgentRuntime:
             default_sub_role=node.config.sub_role,
         ):
             registry.register(tool)
+        for tool in build_collection_tools(memory):
+            registry.register(tool)
 
         # Agent management tools — only register when:
         # 1. There are spawnable roles configured in the domain adapter
@@ -734,6 +851,7 @@ class AgentRuntime:
         memory: AgentWorkingMemory,
         on_orchestrator_tool: Optional[Callable],
         extra_context: Optional[str] = None,
+        phase_context: Optional[str] = None,
     ) -> PhaseResult:
         """Run a single phase and record the summary."""
         # Build working memory snapshot
@@ -747,6 +865,8 @@ class AgentRuntime:
         review = memory.get_review_summary()
         if review != "No review checklist recorded.":
             snapshot_parts.append(f"Review:\n{review}")
+        collections_snap = memory.get_collections_snapshot()
+        snapshot_parts.append(f"Memory Collections:\n{collections_snap}")
         working_snapshot = "\n\n".join(snapshot_parts) if snapshot_parts else None
 
         result = await phase_runner.run(
@@ -758,6 +878,7 @@ class AgentRuntime:
             working_memory_snapshot=working_snapshot,
             extra_context=extra_context,
             on_orchestrator_tool=on_orchestrator_tool,
+            phase_context=phase_context,
         )
 
         # Record phase summary for cross-phase context
@@ -777,15 +898,22 @@ class AgentRuntime:
 
     def _evaluate_review(
         self, review_result: PhaseResult, memory: AgentWorkingMemory,
+        *, lenient: bool = False,
     ) -> Optional[bool]:
         """Determine if the review passed.
 
         The structured checklist (from the review_checklist tool) is the
         primary signal when available — it is more reliable than text
-        markers because it provides per-criterion ratings.  Only "fail"
-        ratings count as a true failure; "partial" ratings are treated as
-        acceptable (the agent did *some* work, and a retry is unlikely to
-        improve things when no additional data sources are available).
+        markers because it provides per-criterion ratings.
+
+        In thorough mode (lenient=False), both "fail" and "partial"
+        ratings count as blocking — they trigger a retry so the agent
+        can attempt to address gaps.
+
+        In lenient mode (lenient=True), only "fail" is blocking.
+        Partial gaps are noted but the agent proceeds to report.
+        This catches fundamentally broken output while accepting
+        minor imperfections.
 
         Text markers (REVIEW_PASSED / REVIEW_FAILED) are used as a
         fallback when no checklist was recorded.
@@ -796,10 +924,12 @@ class AgentRuntime:
         """
         # Prefer structured checklist when available
         if memory.review_checklist:
-            fail_count = sum(
-                1 for item in memory.review_checklist if item.rating == "fail"
+            blocking = ("fail",) if lenient else ("fail", "partial")
+            blocking_count = sum(
+                1 for item in memory.review_checklist
+                if item.rating in blocking
             )
-            return fail_count == 0
+            return blocking_count == 0
 
         # Fall back to explicit text markers
         content = (review_result.content or "").strip()
@@ -812,11 +942,21 @@ class AgentRuntime:
         return None
 
     @staticmethod
-    def _count_review_failures(memory: AgentWorkingMemory) -> int:
-        """Count the number of 'fail' ratings in the current review checklist."""
+    def _count_review_failures(
+        memory: AgentWorkingMemory, *, lenient: bool = False,
+    ) -> int:
+        """Count blocking ratings in the review checklist.
+
+        In thorough mode: 'fail' and 'partial' are blocking.
+        In lenient mode: only 'fail' is blocking.
+        """
         if not memory.review_checklist:
             return 0
-        return sum(1 for item in memory.review_checklist if item.rating == "fail")
+        blocking = ("fail",) if lenient else ("fail", "partial")
+        return sum(
+            1 for item in memory.review_checklist
+            if item.rating in blocking
+        )
 
     def _extract_review_feedback(
         self, review_result: PhaseResult, memory: AgentWorkingMemory,

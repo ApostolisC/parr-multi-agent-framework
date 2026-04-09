@@ -116,12 +116,15 @@ def agent_resumed(
 
 def phase_started(
     workflow_id: str, task_id: str, agent_id: str,
-    phase: str,
+    phase: str, context: str | None = None,
 ) -> FrameworkEvent:
+    data: dict[str, Any] = {"phase": phase}
+    if context:
+        data["context"] = context
     return FrameworkEvent(
         workflow_id=workflow_id, task_id=task_id, agent_id=agent_id,
         event_type="phase_started",
-        data={"phase": phase},
+        data=data,
     )
 
 
@@ -133,6 +136,24 @@ def phase_completed(
         workflow_id=workflow_id, task_id=task_id, agent_id=agent_id,
         event_type="phase_completed",
         data={"phase": phase, "iterations": iterations},
+    )
+
+
+def review_override(
+    workflow_id: str, task_id: str, agent_id: str,
+    retry_count: int, reason: str,
+    failed_criteria: list[dict] | None = None,
+) -> FrameworkEvent:
+    """Emitted when review did not pass but the agent proceeds to Report."""
+    return FrameworkEvent(
+        workflow_id=workflow_id, task_id=task_id, agent_id=agent_id,
+        event_type="review_override",
+        data={
+            "phase": "review",
+            "retry_count": retry_count,
+            "reason": reason,
+            "failed_criteria": failed_criteria or [],
+        },
     )
 
 
@@ -201,11 +222,19 @@ def tool_executed(
 def context_compacted(
     workflow_id: str, task_id: str, agent_id: str,
     phase: str,
+    compaction_type: str = "soft",
+    before_tokens: int = 0,
+    after_tokens: int = 0,
 ) -> FrameworkEvent:
     return FrameworkEvent(
         workflow_id=workflow_id, task_id=task_id, agent_id=agent_id,
         event_type="context_compacted",
-        data={"phase": phase},
+        data={
+            "phase": phase,
+            "compaction_type": compaction_type,
+            "before_tokens": before_tokens,
+            "after_tokens": after_tokens,
+        },
     )
 
 

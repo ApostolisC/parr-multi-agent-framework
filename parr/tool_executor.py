@@ -255,10 +255,11 @@ class ToolExecutor:
         """
         Serialize handler output to string for the LLM.
 
-        When output_schema is set and result is a dict/list, uses json.dumps
-        for proper JSON formatting. Otherwise falls back to str().
+        Always uses json.dumps for dict/list results to ensure valid JSON
+        that can be reliably parsed downstream. Falls back to str() only
+        for scalar types and custom objects.
         """
-        if tool_def.output_schema is not None and isinstance(result, (dict, list)):
+        if isinstance(result, (dict, list)):
             return json.dumps(result, ensure_ascii=False, default=str)
         return str(result)
 

@@ -16,6 +16,7 @@ are yielded back to the caller for handling, not executed here.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -25,6 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from .budget_tracker import BudgetExceededException, BudgetTracker
 from .context_manager import ContextManager
 from .event_bus import EventBus
+from .persistence import AgentFileStore
 from .event_types import (
     FrameworkEvent,
     agent_token,
@@ -150,6 +152,7 @@ class PhaseRunner:
         phase_limits: Optional[Dict[Phase, int]] = None,
         stream: bool = False,
         stall_config: Optional[StallDetectionConfig] = None,
+        file_store: Optional[AgentFileStore] = None,
     ) -> None:
         self._llm = llm
         self._tool_executor = tool_executor
@@ -160,6 +163,7 @@ class PhaseRunner:
         self._phase_limits = phase_limits or DEFAULT_PHASE_LIMITS
         self._stream = stream
         self._stall = stall_config or StallDetectionConfig()
+        self._file_store = file_store
         # Tracks the in-progress phase result so it can be recovered
         # when BudgetExceededException interrupts a phase mid-execution.
         self._in_progress_result: Optional[PhaseResult] = None
@@ -174,6 +178,7 @@ class PhaseRunner:
         working_memory_snapshot: Optional[str] = None,
         extra_context: Optional[str] = None,
         on_orchestrator_tool: Optional[Callable] = None,
+        phase_context: Optional[str] = None,
     ) -> PhaseResult:
         """
         Execute a single phase.
@@ -188,6 +193,8 @@ class PhaseRunner:
             extra_context: Additional context (e.g., review feedback).
             on_orchestrator_tool: Async callback for orchestrator-level tools.
                 Signature: async (ToolCall) -> ToolResult
+            phase_context: Optional context string for the phase_started event
+                (e.g., summary of what the previous phase accomplished).
 
         Returns:
             PhaseResult with the phase's output.
@@ -220,6 +227,7 @@ class PhaseRunner:
             task_id=node.task_id,
             agent_id=node.agent_id,
             phase=phase.value,
+            context=phase_context,
         ))
 
         result = PhaseResult(phase=phase)
@@ -383,6 +391,43 @@ class PhaseRunner:
                 cumulative_tokens=_cumulative_tokens,
             ))
 
+            # Catalog this LLM call to disk for debugging/analysis
+            if self._file_store:
+                try:
+                    # Extract system prompt from messages (first message)
+                    sys_prompt = None
+                    serialised_msgs = []
+                    for m in messages:
+                        m_dict = {"role": m.role.value if hasattr(m.role, "value") else str(m.role)}
+                        if hasattr(m, "content") and m.content:
+                            m_dict["content"] = m.content[:2000] + ("..." if len(m.content or "") > 2000 else "")
+                        if hasattr(m, "tool_calls") and m.tool_calls:
+                            m_dict["tool_calls"] = [
+                                {"name": tc.name, "arguments": tc.arguments}
+                                for tc in m.tool_calls
+                            ]
+                        if hasattr(m, "tool_call_id") and m.tool_call_id:
+                            m_dict["tool_call_id"] = m.tool_call_id
+                        serialised_msgs.append(m_dict)
+                        if m_dict["role"] == "system" and sys_prompt is None:
+                            sys_prompt = m.content
+                    self._file_store.save_llm_call(
+                        phase=phase.value,
+                        iteration=iteration,
+                        system_prompt=sys_prompt,
+                        messages=serialised_msgs,
+                        response_content=response.content,
+                        tool_calls=_event_tool_calls,
+                        token_usage={
+                            "input_tokens": usage.input_tokens,
+                            "output_tokens": usage.output_tokens,
+                            "cost": cost,
+                        },
+                        model=config.model,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to save LLM call catalog: %s", e)
+
             # Process response
             if response.has_tool_calls():
                 # Append assistant message with tool calls
@@ -393,87 +438,75 @@ class PhaseRunner:
                 )
                 messages.append(assistant_msg)
 
-                # Execute each tool call and check for non-framework work
+                # Execute tool calls — parallel when possible.
+                #
+                # If any call is an orchestrator tool (spawn_agent, etc.)
+                # we fall back to sequential execution because orchestrator
+                # tools have complex side-effects that depend on ordering.
+                # Otherwise we run all calls via asyncio.gather for I/O
+                # parallelism (overlapping DB queries, API calls).
                 has_non_framework_calls = False
-                # Collect circuit-breaker messages to append AFTER all tool
-                # results — inserting USER messages between TOOL messages
-                # violates the OpenAI API invariant.
                 _deferred_cb_messages: List[Message] = []
-                for tool_call in response.tool_calls:
-                    # Check cancellation between individual tool calls
+
+                has_orchestrator = any(
+                    (td := self._tool_registry.get(tc.name)) and td.is_orchestrator_tool
+                    for tc in response.tool_calls
+                )
+
+                if not has_orchestrator and len(response.tool_calls) > 1:
+                    # --- PARALLEL EXECUTION ---
                     if node.status == AgentStatus.CANCELLED:
                         raise CancelledException(f"Agent {node.agent_id} was cancelled")
 
-                    tool_result = await self._handle_tool_call(
-                        tool_call=tool_call,
-                        node=node,
-                        workflow=workflow,
-                        phase=phase,
-                        on_orchestrator_tool=on_orchestrator_tool,
-                    )
-
-                    # Append tool result message
-                    messages.append(Message(
-                        role=MessageRole.TOOL,
-                        content=tool_result.content,
-                        tool_call_id=tool_result.tool_call_id,
+                    tool_results = await asyncio.gather(*(
+                        self._handle_tool_call(
+                            tool_call=tc,
+                            node=node,
+                            workflow=workflow,
+                            phase=phase,
+                            on_orchestrator_tool=on_orchestrator_tool,
+                        )
+                        for tc in response.tool_calls
                     ))
 
-                    # Track tool call
-                    result.tool_calls_made.append({
-                        "name": tool_call.name,
-                        "phase": phase.value,
-                        "arguments": tool_call.arguments,
-                        "result_content": tool_result.content,
-                        "success": tool_result.success,
-                        "error": tool_result.error,
-                    })
+                    # Process results in original order
+                    for tool_call, tool_result in zip(response.tool_calls, tool_results):
+                        self._process_tool_result(
+                            tool_call, tool_result, messages, result, phase,
+                            tool_consecutive_failures, _circuit_breaker_warnings,
+                            _deferred_cb_messages,
+                        )
+                        tool_def = self._tool_registry.get(tool_call.name)
+                        if not tool_def or not tool_def.is_framework_tool:
+                            has_non_framework_calls = True
+                            _domain_tool_calls += 1
+                        else:
+                            _framework_tool_calls += 1
+                else:
+                    # --- SEQUENTIAL EXECUTION ---
+                    for tool_call in response.tool_calls:
+                        if node.status == AgentStatus.CANCELLED:
+                            raise CancelledException(f"Agent {node.agent_id} was cancelled")
 
-                    # Circuit breaker: track consecutive failures per tool.
-                    # Reset on success; warn then suppress after threshold.
-                    if tool_result.success:
-                        tool_consecutive_failures.pop(tool_call.name, None)
-                        _circuit_breaker_warnings.discard(tool_call.name)
-                    else:
-                        count = tool_consecutive_failures.get(tool_call.name, 0) + 1
-                        tool_consecutive_failures[tool_call.name] = count
-                        # At threshold-1: warn the LLM (advisory, not removal)
-                        if (count == self._stall.max_consecutive_tool_failures - 1
-                                and tool_call.name not in _circuit_breaker_warnings):
-                            _circuit_breaker_warnings.add(tool_call.name)
-                            _deferred_cb_messages.append(Message(
-                                role=MessageRole.USER,
-                                content=(
-                                    f"[TOOL WARNING] Tool '{tool_call.name}' has "
-                                    f"failed {count} consecutive times. It will "
-                                    f"be temporarily disabled if it fails once "
-                                    f"more. Consider an alternative approach or "
-                                    f"different parameters."
-                                ),
-                            ))
-                        if count == self._stall.max_consecutive_tool_failures:
-                            logger.warning(
-                                f"Circuit breaker: suppressing '{tool_call.name}' "
-                                f"after {count} consecutive failures in "
-                                f"{phase.value} for agent {node.agent_id}"
-                            )
-                            _deferred_cb_messages.append(Message(
-                                role=MessageRole.USER,
-                                content=(
-                                    f"[TOOL DISABLED] Tool '{tool_call.name}' has "
-                                    f"been temporarily disabled after "
-                                    f"{count} consecutive failures. Use alternative "
-                                    f"tools or approaches to continue your work."
-                                ),
-                            ))
+                        tool_result = await self._handle_tool_call(
+                            tool_call=tool_call,
+                            node=node,
+                            workflow=workflow,
+                            phase=phase,
+                            on_orchestrator_tool=on_orchestrator_tool,
+                        )
 
-                    # Check if this is a non-framework tool call
-                    tool_def = self._tool_registry.get(tool_call.name)
-                    if not tool_def or not tool_def.is_framework_tool:
-                        has_non_framework_calls = True
-                        _domain_tool_calls += 1
-                    else:
-                        _framework_tool_calls += 1
+                        self._process_tool_result(
+                            tool_call, tool_result, messages, result, phase,
+                            tool_consecutive_failures, _circuit_breaker_warnings,
+                            _deferred_cb_messages,
+                        )
+                        tool_def = self._tool_registry.get(tool_call.name)
+                        if not tool_def or not tool_def.is_framework_tool:
+                            has_non_framework_calls = True
+                            _domain_tool_calls += 1
+                        else:
+                            _framework_tool_calls += 1
 
                 # Append deferred circuit-breaker messages after all tool
                 # results, so we don't break the assistant→tool pairing.
@@ -660,7 +693,20 @@ class PhaseRunner:
                         return result
 
                 # Check for context truncation
+                self._context_manager.last_compaction_info = None
                 messages = self._context_manager.truncate_if_needed(messages)
+                if self._context_manager.last_compaction_info:
+                    info = self._context_manager.last_compaction_info
+                    await self._event_bus.publish(context_compacted(
+                        workflow_id=workflow.workflow_id,
+                        task_id=node.task_id,
+                        agent_id=node.agent_id,
+                        phase=phase.value,
+                        compaction_type=info.get("type", "soft"),
+                        before_tokens=info.get("before_tokens", 0),
+                        after_tokens=info.get("after_tokens", 0),
+                    ))
+                    self._context_manager.last_compaction_info = None
 
             else:
                 # No tool calls = LLM wants to complete the phase.
@@ -723,6 +769,69 @@ class PhaseRunner:
         )
 
         return result
+
+    def _process_tool_result(
+        self,
+        tool_call: ToolCall,
+        tool_result: ToolResult,
+        messages: List[Message],
+        result: PhaseResult,
+        phase: Phase,
+        tool_consecutive_failures: Dict[str, int],
+        circuit_breaker_warnings: Set[str],
+        deferred_cb_messages: List[Message],
+    ) -> None:
+        """Append tool result message and update tracking/circuit-breaker state."""
+        messages.append(Message(
+            role=MessageRole.TOOL,
+            content=tool_result.content,
+            tool_call_id=tool_result.tool_call_id,
+        ))
+
+        result.tool_calls_made.append({
+            "name": tool_call.name,
+            "phase": phase.value,
+            "arguments": tool_call.arguments,
+            "result_content": tool_result.content,
+            "success": tool_result.success,
+            "error": tool_result.error,
+        })
+
+        # Circuit breaker tracking
+        if tool_result.success:
+            tool_consecutive_failures.pop(tool_call.name, None)
+            circuit_breaker_warnings.discard(tool_call.name)
+        else:
+            count = tool_consecutive_failures.get(tool_call.name, 0) + 1
+            tool_consecutive_failures[tool_call.name] = count
+            if (count == self._stall.max_consecutive_tool_failures - 1
+                    and tool_call.name not in circuit_breaker_warnings):
+                circuit_breaker_warnings.add(tool_call.name)
+                deferred_cb_messages.append(Message(
+                    role=MessageRole.USER,
+                    content=(
+                        f"[TOOL WARNING] Tool '{tool_call.name}' has "
+                        f"failed {count} consecutive times. It will "
+                        f"be temporarily disabled if it fails once "
+                        f"more. Consider an alternative approach or "
+                        f"different parameters."
+                    ),
+                ))
+            if count == self._stall.max_consecutive_tool_failures:
+                logger.warning(
+                    f"Circuit breaker: suppressing '{tool_call.name}' "
+                    f"after {count} consecutive failures in "
+                    f"{phase.value} for agent {tool_call.name}"
+                )
+                deferred_cb_messages.append(Message(
+                    role=MessageRole.USER,
+                    content=(
+                        f"[TOOL DISABLED] Tool '{tool_call.name}' has "
+                        f"been temporarily disabled after "
+                        f"{count} consecutive failures. Use alternative "
+                        f"tools or approaches to continue your work."
+                    ),
+                ))
 
     async def _handle_tool_call(
         self,

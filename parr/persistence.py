@@ -11,6 +11,10 @@ tree that mirrors the agent hierarchy:
     ├── agent.json                  # Root agent config, task, status
     ├── conversation.json           # Phase-by-phase conversations
     ├── tool_calls.json             # Chronological tool call log
+    ├── llm_calls/                  # Per-LLM-call catalog (numbered)
+    │   ├── 001_act_iter0.json      # System prompt, messages, response
+    │   ├── 002_act_iter1.json
+    │   └── ...
     ├── memory/
     │   ├── todo_list.json          # Working memory: todo items
     │   ├── findings.json           # Working memory: findings
@@ -121,6 +125,8 @@ class AgentFileStore:
         self._tool_calls: List[Dict[str, Any]] = []
         self._conversations: Dict[str, Any] = {}
         self._sub_agents_summary: List[Dict[str, Any]] = []
+        # LLM call catalog — sequential counter across all phases
+        self._llm_call_counter: int = 0
 
     @property
     def path(self) -> Path:
@@ -141,9 +147,10 @@ class AgentFileStore:
         depth: int = 0,
         parent_task_id: Optional[str] = None,
         model: str = "",
+        effort_level: Optional[int] = None,
     ) -> None:
         """Save (or overwrite) the agent's identity and task description."""
-        _write_json(self._dir / "agent.json", {
+        info: dict = {
             "task_id": task_id,
             "agent_id": agent_id,
             "role": role,
@@ -153,7 +160,10 @@ class AgentFileStore:
             "depth": depth,
             "parent_task_id": parent_task_id,
             "model": model,
-        })
+        }
+        if effort_level is not None:
+            info["effort_level"] = effort_level
+        _write_json(self._dir / "agent.json", info)
 
     def update_agent_status(self, status: str) -> None:
         """Update only the status field in agent.json."""
@@ -185,6 +195,44 @@ class AgentFileStore:
             "tool_calls_count": len(tool_calls_made) if tool_calls_made else 0,
         }
         _write_json(self._dir / "conversation.json", self._conversations)
+
+    # -- LLM call catalog ---------------------------------------------------
+
+    def save_llm_call(
+        self,
+        *,
+        phase: str,
+        iteration: int,
+        system_prompt: Optional[str] = None,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        response_content: Optional[str] = None,
+        tool_calls: Optional[List[Dict[str, Any]]] = None,
+        token_usage: Optional[Dict[str, Any]] = None,
+        model: str = "",
+    ) -> None:
+        """
+        Save a numbered LLM call record to ``llm_calls/<NNN>_<phase>_iter<N>.json``.
+
+        Each call gets a monotonically increasing number across all phases,
+        making it easy to read them in chronological order.
+        """
+        self._llm_call_counter += 1
+        calls_dir = self._dir / "llm_calls"
+        calls_dir.mkdir(exist_ok=True)
+        filename = f"{self._llm_call_counter:03d}_{phase}_iter{iteration}.json"
+        record = {
+            "call_number": self._llm_call_counter,
+            "phase": phase,
+            "iteration": iteration,
+            "model": model,
+            "system_prompt": system_prompt,
+            "messages_count": len(messages) if messages else 0,
+            "messages": messages,
+            "response_content": response_content,
+            "tool_calls": tool_calls,
+            "token_usage": token_usage,
+        }
+        _write_json(calls_dir / filename, record)
 
     # -- Tool calls ---------------------------------------------------------
 

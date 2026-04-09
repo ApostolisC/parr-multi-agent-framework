@@ -19,9 +19,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from .core_types import (
     AgentConfig,
     AgentInput,
+    EffortLevel,
     Message,
     MessageRole,
     Phase,
+    get_effort_spec,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,10 @@ PHASE_PROMPTS: Dict[Phase, str] = {
 
 Your current task is to create a practical plan for this assignment.
 
+You have access to tools — they are listed in your function schema. Call
+them to retrieve data. Do not assume you cannot use them. Do not ask the
+user for information that a tool can provide.
+
 1. Read the task carefully.
 2. If a parent plan exists, align your work with your assigned scope.
 3. If no parent plan exists, define your own approach.
@@ -56,6 +62,11 @@ Tool usage policy:
   create_todo_list. Each item should be specific and actionable.
 - If you create a todo list, call create_todo_list once, then summarize the
   plan without extra tool calls.
+- When you need to call multiple tools that are independent of each other,
+  call them all in a single response. Prefer parallel tool calls over
+  sequential ones whenever possible.
+- Never call the same tool with the same parameters twice in one conversation.
+  The data will not have changed. Refer to the earlier result instead.
 
 Workload planning:
 - If the task has many independent parts (for example 10+ items to research),
@@ -68,6 +79,10 @@ Workload planning:
 
 Your current task is to complete the assignment efficiently and accurately.
 
+You have access to tools — they are listed in your function schema. Call
+them to retrieve data. Do not assume you cannot use them. Do not ask the
+user for information that a tool can provide.
+
 Execution policy:
 - First decide whether tools are necessary.
 - If the question is simple and the answer is already available from context,
@@ -75,10 +90,29 @@ Execution policy:
 - Use tools only when they materially improve correctness, add required
   evidence, or retrieve missing external information.
 
-When using a todo list:
-1. Work through items in order.
-2. Record key results with log_finding or batch_log_findings.
-3. Mark completion with mark_todo_complete or batch_mark_todo_complete.
+Efficiency — critical rules:
+- ALWAYS use batch_operations to combine multiple memory operations into a
+  single tool call. For example, instead of calling create_todo_list, then
+  create_collection, then batch_log_findings, then batch_mark_todo_complete
+  as four separate calls — combine them all into ONE batch_operations call.
+  Each separate tool call costs a full iteration. Minimise iterations.
+- Never call the same tool with the same parameters twice. If you already
+  called a tool with certain arguments, the result is in your conversation
+  history. Refer to it directly instead of calling again.
+- When you need to call multiple independent tools, call them ALL in a
+  single response as parallel tool calls. Only use sequential calls when
+  one result is needed to form the next call's arguments.
+- When creating a collection, pass initial_items directly in create_collection
+  instead of making a separate add_to_collection call.
+
+Typical efficient pattern (one batch_operations call):
+  batch_operations({operations: [
+    {op: "create_todo_list", items: [...]},
+    {op: "create_collection", collection_name: "...", description: "...",
+     initial_items: [{content: "..."}]},
+    {op: "log_findings", findings: [{category, content, source}]},
+    {op: "mark_todos_complete", items: [{item_index, summary}]}
+  ]})
 
 Delegation:
 - Use spawn_agent only for clearly complex or parallelizable sub-tasks.
@@ -93,21 +127,42 @@ Guidelines:
     Phase.REVIEW: """
 --- Phase: Review ---
 
-Your current task is to evaluate the work completed so far. Consider:
+Your task is to evaluate the analytical work completed so far.
 
-1. Does the collected data/analysis address the original task fully?
-   Look at the findings (get_findings) - do they answer the question asked?
-2. Are there gaps, contradictions, or areas where quality is insufficient?
-3. Were any tools or sub-agents that failed critical to the task?
-4. Is the quality of findings sufficient for reporting?
+Important: you are reviewing ANALYTICAL THOROUGHNESS, not whether the
+output is a finished product. The goal of this analysis is to deeply
+examine the project's current state, identify strengths, gaps, and
+issues, and present findings so humans can decide on next steps. It
+is NOT meant to be a final regulator-grade deliverable.
 
-Focus on whether the task was accomplished, not on process details like
-whether the todo list was properly managed. If the task asked for 3 items
-and findings contain 3 quality answers, that is a pass - regardless of
-todo list state.
+Evaluation criteria — focus on these:
+1. **Coverage**: Did the analysis address the scope of the original task?
+   Were all relevant data sources queried? Were all items examined?
+2. **Depth**: Are findings specific and actionable, or generic?
+   "Customer emails exposed via unencrypted API" is good.
+   "Data could be breached" is too vague.
+3. **Honesty about limitations**: If data was unavailable (e.g., no controls
+   documented, user hasn't reached that DPIA phase yet), is this explicitly
+   stated as a limitation? Limitations and gaps are VALID findings — they
+   should be logged, not treated as failures.
+4. **Findings quality**: Are findings well-categorized with appropriate
+   confidence levels? Is evidence cited where available?
+
+What is NOT a failure:
+- Missing data because the project is in an early phase — that's a limitation
+- Gaps in the project's controls/mitigations — those are findings, not failures
+- The analysis not being a complete DPIA — that was never the goal
 
 Use the review_checklist tool to record your evaluation for each criterion.
 Rate each: "pass", "partial", or "fail" with a brief justification.
+
+Your working memory snapshot (above) lists any memory collections with their
+names and item counts. Only call get_collection for collections that appear
+in the snapshot. Do not call list_collections if the snapshot already shows
+the collection inventory.
+
+Never call the same tool with the same parameters twice. Use results already
+in your conversation history.
 
 If all criteria pass, respond with "REVIEW_PASSED" and a brief summary.
 If criteria fail, respond with "REVIEW_FAILED" and specific descriptions
@@ -129,6 +184,16 @@ Reporting policy:
 If you use submit_report, pass report fields directly as top-level parameters
 (for example: title, summary, findings, recommendations), not inside a
 "report" object.
+
+Memory collections:
+- Your working memory snapshot (above) lists any collections from prior phases
+  with their names, descriptions, and item counts. Only call get_collection
+  for collections that appear in the snapshot. Do not call list_collections
+  if the snapshot already shows the collection inventory.
+
+Never call the same tool with the same parameters twice. If you already
+retrieved findings or agent results, use the result from your conversation.
+When calling multiple tools, prefer parallel calls in a single response.
 
 After the deliverable is ready or submitted, respond with a concise summary
 without additional tool calls.
@@ -166,6 +231,8 @@ class ContextManager:
         self._phase_summaries: Dict[Phase, str] = {}
         # Working memory state summaries (todo list, findings, etc.)
         self._working_memory_snapshot: Optional[str] = None
+        # Set after any compaction/truncation so callers can emit events
+        self.last_compaction_info: Optional[Dict[str, Any]] = None
 
     def estimate_tokens(self, messages: List[Message]) -> int:
         """Estimate token count for a message sequence.
@@ -324,6 +391,12 @@ class ContextManager:
 
         new_tokens = self.estimate_tokens(result)
         logger.info(f"Soft compaction: {current_tokens} → {new_tokens} tokens")
+        self.last_compaction_info = {
+            "type": "soft",
+            "before_tokens": current_tokens,
+            "after_tokens": new_tokens,
+            "dropped_groups": len(droppable_messages),
+        }
         return result
 
     def truncate_if_needed(
@@ -406,6 +479,12 @@ class ContextManager:
 
         new_tokens = self.estimate_tokens(result)
         logger.info(f"Hard truncation: {current_tokens} → {new_tokens} tokens")
+        self.last_compaction_info = {
+            "type": "hard",
+            "before_tokens": current_tokens,
+            "after_tokens": new_tokens,
+            "dropped_groups": len(dropped_messages),
+        }
         return result
 
     def _build_system_prompt(
@@ -440,6 +519,26 @@ class ContextManager:
                     f"Required tools for this phase: please call the following "
                     f"tools before completing: {', '.join(mandatory)}"
                 )
+
+        # Effort level awareness (first phase only — Plan or Act)
+        if input.effort_level is not None and phase in (Phase.PLAN, Phase.ACT):
+            effort_phases, _, _ = get_effort_spec(input.effort_level)
+            phase_names = " → ".join(p.value.capitalize() for p in effort_phases)
+            effort_name = EffortLevel(input.effort_level).name.capitalize()
+            effort_msg = (
+                f"Effort level: {input.effort_level} ({effort_name}). "
+                f"Pipeline: {phase_names}. "
+                f"Sub-agents inherit this level by default and cannot exceed it. "
+                f"You may set a lower effort_level per sub-agent if the task is "
+                f"simple, but never higher than {input.effort_level}."
+            )
+            if input.effort_level <= 1:
+                effort_msg += (
+                    " At this effort level, be maximally efficient: "
+                    "use batch_operations for ALL memory work in a single call, "
+                    "minimise iterations, avoid unnecessary tool calls."
+                )
+            parts.append(effort_msg)
 
         # Untrusted content warning
         parts.append(

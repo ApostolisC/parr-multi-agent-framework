@@ -171,6 +171,26 @@ class DomainAdapter(Protocol):
         """
         ...
 
+    def get_initial_context(self, role: str, sub_role: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        Get pre-loaded domain data to inject into an agent's first phase.
+
+        Called by the orchestrator for EVERY agent (root and spawned).
+        Returns a dict that will be set as AgentInput.raw_data, appearing
+        under "## Available Data" in the agent's first user message.
+
+        This eliminates redundant tool calls — agents start with data
+        already available instead of fetching it via tools.
+
+        Args:
+            role: Role identifier.
+            sub_role: Optional sub-role.
+
+        Returns:
+            Dict of pre-loaded data keyed by tool name, or None.
+        """
+        ...
+
     def persist_output(self, workflow_id: str, agent_output: AgentOutput) -> None:
         """
         Persist the final workflow output to the application's storage.

@@ -16,7 +16,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from enum import Enum
+from enum import Enum, IntEnum
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
@@ -45,6 +45,49 @@ class Phase(str, Enum):
     ACT = "act"
     REVIEW = "review"
     REPORT = "report"
+
+
+class EffortLevel(IntEnum):
+    """Controls which phases run and how strict review is.
+
+    Level 0 (Minimal): Act only — single LLM call, no report.
+    Level 1 (Quick):   Act → Report.
+    Level 2 (Focused): Plan → Act → Report. **Default.**
+    Level 3 (Thorough): Plan → Act → Review → Report (lenient review).
+    Level 4 (Rigorous): Plan → Act → Review → Report (strict review + retries).
+    """
+    MINIMAL = 0
+    QUICK = 1
+    FOCUSED = 2
+    THOROUGH = 3
+    RIGOROUS = 4
+
+
+class ReviewMode(str, Enum):
+    """How strictly the Review phase evaluates the agent's work."""
+    NONE = "none"        # No review phase
+    LENIENT = "lenient"  # Partial ratings count as pass
+    STRICT = "strict"    # Partial/fail trigger rework
+
+
+# Effort level → (phases, review_mode, max_review_retries)
+_EFFORT_SPECS: Dict[int, tuple] = {
+    0: ([Phase.ACT], ReviewMode.NONE, 0),
+    1: ([Phase.ACT, Phase.REPORT], ReviewMode.NONE, 0),
+    2: ([Phase.PLAN, Phase.ACT, Phase.REPORT], ReviewMode.NONE, 0),
+    3: ([Phase.PLAN, Phase.ACT, Phase.REVIEW, Phase.REPORT], ReviewMode.LENIENT, 0),
+    4: ([Phase.PLAN, Phase.ACT, Phase.REVIEW, Phase.REPORT], ReviewMode.STRICT, 2),
+}
+
+
+def get_effort_spec(
+    effort_level: int,
+) -> tuple:
+    """Return (phases, review_mode, max_review_retries) for an effort level."""
+    return _EFFORT_SPECS.get(
+        effort_level,
+        _EFFORT_SPECS[2],  # default to Focused
+    )
 
 
 class AgentStatus(str, Enum):
@@ -188,6 +231,7 @@ class ToolDef:
     retry_on_failure: bool = False                   # Auto-retry on handler exception
     max_retries: int = 0                             # Retry attempts (only if retry_on_failure)
     wraps_untrusted_content: bool = False            # Results contain user-uploaded content
+    cacheable: bool = False                          # Opt-in: cache results for identical args (off by default)
 
     def to_llm_schema(self) -> Dict[str, Any]:
         """Convert to the schema format sent to the LLM."""
@@ -220,7 +264,7 @@ class BudgetConfig:
     child_budget_fraction: float = 0.5  # Fraction of remaining budget for children
     parent_recovery_budget_pct: float = 0.10  # Fraction of budget reserved for parent recovery after sub-agents
     max_child_review_cycles: Optional[int] = None  # None = use parent's max_review_cycles
-    context_soft_compaction_pct: float = 0.40  # Fraction of context for soft compaction
+    context_soft_compaction_pct: float = 0.78  # Fraction of context for soft compaction (~100K of 128K)
     context_hard_truncation_pct: float = 0.65  # Fraction of context for hard truncation
     chars_per_token: float = 4.0  # Tuneable token estimation ratio (chars / token)
 
@@ -358,6 +402,7 @@ class AgentInput:
     additional_context: Optional[str] = None
     parent_errors: Optional[List[ErrorEntry]] = None
     budget: BudgetConfig = field(default_factory=BudgetConfig)
+    effort_level: Optional[int] = None
 
     def __repr__(self) -> str:
         task_preview = self.task[:50]

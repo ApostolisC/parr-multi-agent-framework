@@ -29,6 +29,7 @@ from .core_types import (
     BudgetUsage,
     Confidence,
     CostConfig,
+    EffortLevel,
     ErrorEntry,
     ErrorSource,
     ExecutionMetadata,
@@ -42,6 +43,7 @@ from .core_types import (
     PlanContext,
     PlanStep,
     PlanStepStatus,
+    ReviewMode,
     SimpleQueryBypassConfig,
     StallDetectionConfig,
     TokenUsage,
@@ -52,6 +54,7 @@ from .core_types import (
     WorkflowExecution,
     WorkflowStatus,
     generate_id,
+    get_effort_spec,
     utc_now,
 )
 
@@ -87,7 +90,7 @@ from .tool_registry import ToolRegistry
 from .tool_executor import ToolExecutor
 
 # Framework tools (for testing / custom setups)
-from .framework_tools import AgentWorkingMemory
+from .framework_tools import AgentWorkingMemory, MemoryCollection
 
 # Phase runner (for advanced usage)
 from .phase_runner import CancelledException, PhaseRunner, PhaseResult
@@ -130,6 +133,7 @@ __all__ = [
     "BudgetUsage",
     "Confidence",
     "CostConfig",
+    "EffortLevel",
     "ErrorEntry",
     "ErrorSource",
     "ExecutionMetadata",
@@ -143,6 +147,7 @@ __all__ = [
     "PlanContext",
     "PlanStep",
     "PlanStepStatus",
+    "ReviewMode",
     "SimpleQueryBypassConfig",
     "StallDetectionConfig",
     "TokenUsage",
@@ -154,6 +159,7 @@ __all__ = [
     "WorkflowStatus",
     # Helpers
     "generate_id",
+    "get_effort_spec",
     "utc_now",
     # Protocols
     "DomainAdapter",
@@ -182,6 +188,7 @@ __all__ = [
     "ToolRegistry",
     "ToolExecutor",
     "AgentWorkingMemory",
+    "MemoryCollection",
     # Context
     "ContextManager",
     # Adapters
