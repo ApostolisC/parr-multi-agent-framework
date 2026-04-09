@@ -40,6 +40,9 @@ dev = [
     "anthropic>=0.20",
 ]
 
+[project.scripts]
+parr-ui = "parr.debug_ui.__main__:main"
+
 [project.urls]
 Repository = "https://github.com/ApostolisC/parr-multi-agent-framework"
 

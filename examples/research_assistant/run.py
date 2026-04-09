@@ -38,6 +38,12 @@ from parr import (
 from parr.adapters import LoggingEventSink
 from parr.config import load_config, create_orchestrator_from_config
 
+from examples.research_assistant.rag_tools import (
+    build_rag_tools,
+    SEARCH_KB_TOOL,
+    GET_DOCUMENT_TOOL,
+)
+
 # ---------------------------------------------------------------------------
 # Simulated document corpus (stands in for a real search backend)
 # ---------------------------------------------------------------------------
@@ -387,16 +393,20 @@ async def run(
     """Run the research assistant example."""
     config_dir = Path(__file__).parent / "config"
 
+    # Base tool registry — in-memory corpus tools + Weaviate RAG tools
+    tool_registry = {
+        "search_documents": SEARCH_TOOL,
+        "read_section": READ_TOOL,
+        "read_multiple_sections": READ_MULTI_TOOL,
+        **build_rag_tools(),
+    }
+
     if live:
         # LLM is auto-created from providers.yaml + environment variables.
         # provider/model overrides are passed through to the config loader.
         orchestrator = create_orchestrator_from_config(
             config_dir=config_dir,
-            tool_registry={
-                "search_documents": SEARCH_TOOL,
-                "read_section": READ_TOOL,
-                "read_multiple_sections": READ_MULTI_TOOL,
-            },
+            tool_registry=tool_registry,
             event_sink=LoggingEventSink(),
             provider_override=provider,
             model_override=model,
@@ -407,11 +417,7 @@ async def run(
         print("Using mock LLM (offline demo)")
         orchestrator = create_orchestrator_from_config(
             config_dir=config_dir,
-            tool_registry={
-                "search_documents": SEARCH_TOOL,
-                "read_section": READ_TOOL,
-                "read_multiple_sections": READ_MULTI_TOOL,
-            },
+            tool_registry=tool_registry,
             llm=llm,
             event_sink=LoggingEventSink(),
         )

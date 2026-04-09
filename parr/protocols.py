@@ -162,6 +162,26 @@ class DomainAdapter(Protocol):
         """
         ...
 
+    def get_direct_answer_schema_policy(
+        self, role: str, sub_role: Optional[str] = None
+    ) -> Optional[str]:
+        """
+        Get the direct-answer schema policy for a role.
+
+        Controls how the output schema is handled during direct-answer bypass:
+        - ``"enforce"``: Direct answer must produce schema-compliant JSON.
+        - ``"bypass"``:  Direct answer is free-form text.
+        - ``None``:      Use global ``force_full_workflow_if_output_schema`` gate.
+
+        Args:
+            role: Role identifier.
+            sub_role: Optional sub-role.
+
+        Returns:
+            ``"enforce"``, ``"bypass"``, or ``None``.
+        """
+        ...
+
     def list_available_roles(self) -> List[Dict[str, Any]]:
         """
         List all available roles for the spawn_agent tool description.

@@ -37,12 +37,20 @@ class EventBus:
     subscribers for the matching workflow_id.
 
     Async-safe for concurrent publish/subscribe via asyncio.Lock.
+
+    An optional ``on_handler_error`` callback is invoked when a subscriber's
+    handler raises an exception.  The default logs and continues; callers
+    can provide a custom callback to collect or re-raise errors.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        on_handler_error: Optional[Callable[[FrameworkEvent, Exception], None]] = None,
+    ) -> None:
         self._subscriptions: Dict[str, List[Subscription]] = {}
         self._next_id: int = 0
         self._lock = asyncio.Lock()
+        self._on_handler_error = on_handler_error
 
     async def publish(self, event: FrameworkEvent) -> None:
         """Publish an event to all subscribers for this workflow."""
@@ -56,6 +64,8 @@ class EventBus:
                     f"Event handler error for {event.event_type}: {e}",
                     exc_info=True,
                 )
+                if self._on_handler_error is not None:
+                    self._on_handler_error(event, e)
 
     def subscribe(
         self,

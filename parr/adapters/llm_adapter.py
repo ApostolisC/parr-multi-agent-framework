@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -52,8 +53,8 @@ logger = logging.getLogger(__name__)
 # Retry configuration for transient API errors
 # ---------------------------------------------------------------------------
 
-_MAX_RETRIES = 5
-_RETRY_BACKOFF_SECONDS = [1.0, 2.0, 4.0, 8.0, 16.0]
+_MAX_RETRIES = 12
+_RETRY_BACKOFF_SECONDS = [1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0, 60.0, 60.0, 60.0, 60.0, 60.0]
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
@@ -186,6 +187,25 @@ _CONTENT_FILTER_RETRIES = 1  # One retry for non-deterministic filter triggers
 _CONTENT_FILTER_RETRY_DELAY = 2.0  # seconds
 
 
+def _extract_retry_after(error: Exception) -> Optional[float]:
+    """Extract Retry-After value from an API error response.
+
+    Both OpenAI and Anthropic SDKs may include the ``Retry-After``
+    header on 429 responses.  Returns the delay in seconds, or
+    ``None`` if the header is not available.
+    """
+    try:
+        response = getattr(error, "response", None)
+        if response is not None:
+            headers = getattr(response, "headers", None) or {}
+            raw = headers.get("retry-after") or headers.get("Retry-After")
+            if raw is not None:
+                return float(raw)
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return None
+
+
 async def _with_retry(
     coro_factory: Callable[[], Any],
     provider_name: str,
@@ -240,9 +260,16 @@ async def _with_retry(
 
             if attempt < _MAX_RETRIES and _is_retryable_error(e):
                 delay = _RETRY_BACKOFF_SECONDS[attempt]
+                # Honour Retry-After header from 429 responses
+                retry_after = _extract_retry_after(e)
+                if retry_after is not None:
+                    delay = max(delay, retry_after)
+                # Add jitter to prevent thundering-herd when multiple
+                # concurrent agents hit rate limits simultaneously
+                delay = delay * random.uniform(0.5, 1.5)
                 logger.warning(
                     f"{provider_name} API transient error (attempt {attempt + 1}/"
-                    f"{_MAX_RETRIES + 1}), retrying in {delay}s: "
+                    f"{_MAX_RETRIES + 1}), retrying in {delay:.1f}s: "
                     f"{type(e).__name__}: {e}"
                 )
                 await asyncio.sleep(delay)

@@ -276,6 +276,16 @@ class AgentWorkingMemory:
             lines.append(f"[{item.rating.upper()}] {item.criterion}: {item.justification}")
         return "\n".join(lines)
 
+    # -- Transition operations --
+
+    def set_next_phase(self, phase: str, reason: str = "") -> str:
+        """Record a phase transition request."""
+        valid_phases = {"plan", "act", "review", "report"}
+        if phase not in valid_phases:
+            return f"Error: Invalid phase '{phase}'. Must be one of: {', '.join(sorted(valid_phases))}"
+        self.requested_next_phase = phase
+        return f"Transition registered: will go to '{phase}' after current phase. Reason: {reason}"
+
     # -- Report operations --
 
     def submit_report(self, report: Dict[str, Any]) -> str:
@@ -511,6 +521,7 @@ def build_plan_tools(memory: AgentWorkingMemory) -> List[ToolDef]:
             handler=lambda: memory.get_todo_list(),
             phase_availability=[Phase.PLAN, Phase.ACT, Phase.REVIEW, Phase.REPORT],
             is_framework_tool=True,
+            is_read_only=True,
         ),
     ]
 
@@ -535,6 +546,7 @@ def build_act_tools(memory: AgentWorkingMemory) -> List[ToolDef]:
             handler=lambda item_index, summary: memory.mark_todo_complete(item_index, summary),
             phase_availability=[Phase.ACT],
             is_framework_tool=True,
+            marks_progress=True,
         ),
         ToolDef(
             name="batch_mark_todo_complete",
@@ -564,6 +576,7 @@ def build_act_tools(memory: AgentWorkingMemory) -> List[ToolDef]:
             handler=lambda items: memory.batch_mark_todo_complete(items),
             phase_availability=[Phase.ACT],
             is_framework_tool=True,
+            marks_progress=True,
         ),
         ToolDef(
             name="log_finding",
@@ -590,6 +603,7 @@ def build_act_tools(memory: AgentWorkingMemory) -> List[ToolDef]:
             ),
             phase_availability=[Phase.ACT, Phase.REPORT],
             is_framework_tool=True,
+            marks_progress=True,
         ),
         ToolDef(
             name="batch_log_findings",
@@ -624,6 +638,7 @@ def build_act_tools(memory: AgentWorkingMemory) -> List[ToolDef]:
             handler=lambda findings: memory.batch_log_findings(findings),
             phase_availability=[Phase.ACT, Phase.REPORT],
             is_framework_tool=True,
+            marks_progress=True,
         ),
         ToolDef(
             name="get_findings",
@@ -640,6 +655,7 @@ def build_act_tools(memory: AgentWorkingMemory) -> List[ToolDef]:
             handler=lambda category=None: memory.get_findings(category),
             phase_availability=[Phase.ACT, Phase.REVIEW, Phase.REPORT],
             is_framework_tool=True,
+            is_read_only=True,
         ),
         ToolDef(
             name="batch_operations",
@@ -781,6 +797,7 @@ def build_review_tools(memory: AgentWorkingMemory) -> List[ToolDef]:
             handler=lambda items: memory.record_review_checklist(items),
             phase_availability=[Phase.REVIEW],
             is_framework_tool=True,
+            marks_progress=True,
         ),
     ]
 
@@ -892,6 +909,7 @@ def build_report_tools(
             handler=lambda **kwargs: memory.submit_report(kwargs if kwargs else {}),
             phase_availability=[Phase.REPORT],
             is_framework_tool=True,
+            marks_progress=True,
         ),
     ]
     return tools
@@ -1179,5 +1197,164 @@ def build_agent_management_tools(available_roles_description: str) -> List[ToolD
             phase_availability=[Phase.ACT, Phase.REPORT],
             is_framework_tool=True,
             is_orchestrator_tool=True,
+        ),
+    ]
+
+
+def build_coordination_tools() -> List[ToolDef]:
+    """
+    Build orchestrator-intercepted agent coordination tools.
+
+    These tools enable inter-agent message passing and shared state
+    during workflow execution.  Like the agent management tools, they
+    have ``is_orchestrator_tool=True`` — the orchestrator intercepts and
+    handles them.
+    """
+    return [
+        ToolDef(
+            name="send_message",
+            description=(
+                "Send a message to another agent in the same workflow. "
+                "You can message your parent, children, or sibling agents. "
+                "Use this to share intermediate findings, request information, "
+                "or coordinate work."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "to_task_id": {
+                        "type": "string",
+                        "description": "Task ID of the recipient agent.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Human-readable message content.",
+                    },
+                    "message_type": {
+                        "type": "string",
+                        "enum": ["info", "request", "response", "warning", "data"],
+                        "description": (
+                            "Type of message. 'info' for general updates, "
+                            "'request' to ask for something, 'response' to "
+                            "reply, 'warning' for issues, 'data' for structured "
+                            "data payloads. Defaults to 'info'."
+                        ),
+                    },
+                    "data": {
+                        "type": "object",
+                        "description": "Optional: structured data payload.",
+                    },
+                },
+                "required": ["to_task_id", "content"],
+            },
+            handler=None,
+            phase_availability=[Phase.ACT],
+            is_framework_tool=True,
+            is_orchestrator_tool=True,
+        ),
+        ToolDef(
+            name="read_messages",
+            description=(
+                "Read messages sent to you by other agents. Returns any new "
+                "messages since the last read. Use this to check for updates, "
+                "requests, or data from parent/child/sibling agents."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {},
+            },
+            handler=None,
+            phase_availability=[Phase.PLAN, Phase.ACT, Phase.REVIEW, Phase.REPORT],
+            is_framework_tool=True,
+            is_orchestrator_tool=True,
+            is_read_only=True,
+        ),
+        ToolDef(
+            name="set_shared_state",
+            description=(
+                "Write a key-value pair to the workflow's shared state. "
+                "All agents in the workflow can read shared state. "
+                "Use this to publish data that multiple agents need."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "State key (e.g. 'risk_findings', 'config.threshold').",
+                    },
+                    "value": {
+                        "description": "Value to store (any JSON-serializable type).",
+                    },
+                },
+                "required": ["key", "value"],
+            },
+            handler=None,
+            phase_availability=[Phase.ACT],
+            is_framework_tool=True,
+            is_orchestrator_tool=True,
+        ),
+        ToolDef(
+            name="get_shared_state",
+            description=(
+                "Read from the workflow's shared state. "
+                "Omit 'key' to get all shared state, or provide a specific "
+                "key to get its value."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "Optional: specific key to read. Omit to get all state.",
+                    },
+                },
+            },
+            handler=None,
+            phase_availability=[Phase.PLAN, Phase.ACT, Phase.REVIEW, Phase.REPORT],
+            is_framework_tool=True,
+            is_orchestrator_tool=True,
+            is_read_only=True,
+        ),
+    ]
+
+
+def build_transition_tools(memory: AgentWorkingMemory) -> List[ToolDef]:
+    """Build the set_next_phase tool for agent-controlled phase transitions."""
+    return [
+        ToolDef(
+            name="set_next_phase",
+            description=(
+                "Control what happens after the current phase. You can transition "
+                "to ANY phase:\n"
+                "- 'plan': Go back to planning (e.g., after review reveals gaps "
+                "  that need a revised plan)\n"
+                "- 'act': Go back to execution (e.g., after review identifies "
+                "  missing work, or to do additional research)\n"
+                "- 'review': Run quality validation before reporting\n"
+                "- 'report': Skip directly to final report (e.g., if you "
+                "  disagree with a failed review and believe your work is adequate)\n\n"
+                "Default transitions: after planning -> execution, "
+                "after execution -> reporting.\n"
+                "You have full autonomy over phase flow. Use your judgment."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "phase": {
+                        "type": "string",
+                        "enum": ["plan", "act", "review", "report"],
+                        "description": "Which phase to transition to next.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Brief explanation for this transition.",
+                    },
+                },
+                "required": ["phase"],
+            },
+            handler=lambda phase, reason="": memory.set_next_phase(phase, reason),
+            phase_availability=[Phase.PLAN, Phase.ACT, Phase.REVIEW],
+            is_framework_tool=True,
         ),
     ]

@@ -597,3 +597,9 @@ The framework manages conversation history automatically:
 - **Hard truncation** — At 65%, only system prompt + user message + last 3 message groups are kept.
 
 Token estimation uses ~4 characters per token. This is approximate but prevents context overflow on all major models.
+
+---
+
+## 16. Debug UI
+
+PARR includes a browser-based debug dashboard for inspecting agent sessions. See the [README](README.md#debug-ui) for setup instructions covering standalone CLI, library mode (`PARRDashboard`), and file-only browsing.

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest parr/tests/ -x -q --tb=short)",
+      "Bash(python -m pytest parr/tests/ -v --tb=short)"
+    ]
+  }
+}

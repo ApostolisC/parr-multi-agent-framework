@@ -548,3 +548,80 @@ class TestPersistenceEdgeCases:
         store.save_agent_info(task_id="t1", agent_id="a1", role="analyst", status="completed")
         data = store.read_agent_info()
         assert data["status"] == "completed"
+
+
+# =========================================================================
+# save_memory — None-safe guards
+# =========================================================================
+
+
+class TestSaveMemoryNoneGuards:
+    """Ensure save_memory handles None attributes without crashing."""
+
+    def test_none_review_checklist(self, tmp_path: Path):
+        """save_memory must not crash when review_checklist is None."""
+        store = AgentFileStore(tmp_path / "agent")
+        mem = AgentWorkingMemory()
+        mem.todo_list = [TodoItem(index=0, description="Do something")]
+        mem.findings = [Finding(category="test", content="data", source="src")]
+        mem.review_checklist = None  # Explicitly None (REVIEW skipped)
+        mem.submitted_report = None
+        store.save_memory(mem)  # Must not raise TypeError
+
+        review_data = _read_json(tmp_path / "agent" / "memory" / "review.json")
+        assert review_data == []
+
+    def test_none_todo_list(self, tmp_path: Path):
+        """save_memory must not crash when todo_list is None."""
+        store = AgentFileStore(tmp_path / "agent")
+        mem = AgentWorkingMemory()
+        mem.todo_list = None
+        mem.findings = []
+        mem.review_checklist = None
+        mem.submitted_report = None
+        store.save_memory(mem)  # Must not raise
+
+        todo_data = _read_json(tmp_path / "agent" / "memory" / "todo_list.json")
+        assert todo_data == []
+
+    def test_none_findings(self, tmp_path: Path):
+        """save_memory must not crash when findings is None."""
+        store = AgentFileStore(tmp_path / "agent")
+        mem = AgentWorkingMemory()
+        mem.todo_list = []
+        mem.findings = None
+        mem.review_checklist = None
+        mem.submitted_report = None
+        store.save_memory(mem)
+
+        findings_data = _read_json(tmp_path / "agent" / "memory" / "findings.json")
+        assert findings_data == []
+
+    def test_all_none(self, tmp_path: Path):
+        """save_memory with all memory fields None must not crash."""
+        store = AgentFileStore(tmp_path / "agent")
+        mem = AgentWorkingMemory()
+        mem.todo_list = None
+        mem.findings = None
+        mem.review_checklist = None
+        mem.submitted_report = None
+        store.save_memory(mem)
+
+        # All files should exist with empty data
+        assert _read_json(tmp_path / "agent" / "memory" / "todo_list.json") == []
+        assert _read_json(tmp_path / "agent" / "memory" / "findings.json") == []
+        assert _read_json(tmp_path / "agent" / "memory" / "review.json") == []
+        assert _read_json(tmp_path / "agent" / "memory" / "report.json") is None
+
+    def test_populated_memory_still_works(self, tmp_path: Path):
+        """save_memory with fully populated memory still works as before."""
+        store = AgentFileStore(tmp_path / "agent")
+        mem = _make_memory()
+        store.save_memory(mem)
+
+        todo_data = _read_json(tmp_path / "agent" / "memory" / "todo_list.json")
+        assert len(todo_data) == 2
+        findings_data = _read_json(tmp_path / "agent" / "memory" / "findings.json")
+        assert len(findings_data) == 1
+        review_data = _read_json(tmp_path / "agent" / "memory" / "review.json")
+        assert len(review_data) == 1

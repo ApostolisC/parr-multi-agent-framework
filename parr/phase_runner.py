@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .budget_tracker import BudgetExceededException, BudgetTracker
@@ -38,6 +39,7 @@ from .event_types import (
     phase_started,
     tool_executed,
 )
+from .stall_detector import StallDetector
 from .tool_executor import ToolExecutor
 from .tool_registry import ToolRegistry
 from .core_types import (
@@ -74,36 +76,8 @@ DEFAULT_PHASE_LIMITS: Dict[Phase, int] = {
 }
 
 # Stall detection defaults are defined in StallDetectionConfig (core_types.py).
-# The PhaseRunner accepts an optional StallDetectionConfig at construction time.
-
-# Framework tools that are considered read-only (no state change).
-# Consecutive iterations containing ONLY these tools (and no others)
-# are "stalled" iterations.
-_READ_ONLY_FRAMEWORK_TOOLS = frozenset({
-    "get_todo_list",
-    "get_findings",
-})
-
-# Framework tools that produce actual work output (not just bookkeeping).
-# When the LLM calls these, it IS doing real work — logging analysis results
-# or marking progress.  These reset the framework-only stall counter so that
-# tasks without domain tools (pure analysis / sub-agents with no external
-# data sources) aren't force-stopped while making genuine progress.
-_PROGRESS_FRAMEWORK_TOOLS = frozenset({
-    "log_finding",
-    "batch_log_findings",
-    "mark_todo_complete",
-    "batch_mark_todo_complete",
-    "review_checklist",
-    "submit_report",
-})
-
-
-
-def _hash_tool_call(name: str, arguments: dict) -> str:
-    """Produce a stable hash for a (tool_name, arguments) pair."""
-    key = name + ":" + json.dumps(arguments, sort_keys=True, default=str)
-    return hashlib.md5(key.encode()).hexdigest()
+# The PhaseRunner accepts an optional StallDetectionConfig at construction time,
+# or a custom StallDetector instance for fully pluggable stall detection.
 
 
 @dataclass
@@ -115,6 +89,7 @@ class PhaseResult:
     hit_iteration_limit: bool = False
     total_usage: TokenUsage = field(default_factory=TokenUsage)
     tool_calls_made: List[Dict[str, Any]] = field(default_factory=list)
+    llm_calls: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -167,6 +142,56 @@ class PhaseRunner:
         # Tracks the in-progress phase result so it can be recovered
         # when BudgetExceededException interrupts a phase mid-execution.
         self._in_progress_result: Optional[PhaseResult] = None
+        # Optional callback invoked after each tool call is tracked.
+        # Used for incremental persistence so the debug UI can show
+        # live updates during phase execution (not just at phase end).
+        self._on_tool_persisted = on_tool_persisted
+        # Optional callback invoked after each LLM call for persistence.
+        self._on_llm_call_persisted = on_llm_call_persisted
+
+    async def run_continuation(
+        self,
+        phase: Phase,
+        node: AgentNode,
+        workflow: WorkflowExecution,
+        config: AgentConfig,
+        input: AgentInput,
+        initial_messages: List[Message],
+        initial_tool_calls: Optional[List[Dict[str, Any]]] = None,
+        initial_iteration: int = 1,
+        on_orchestrator_tool: Optional[Callable] = None,
+    ) -> PhaseResult:
+        """Continue a phase from an existing message history.
+
+        Used by the adaptive flow: the entry call produces messages and
+        tool calls that become iteration 0 of the detected phase.  This
+        method picks up from there.
+
+        Args:
+            phase: The detected phase.
+            node: The agent's node in the tree.
+            workflow: The parent workflow execution.
+            config: Agent configuration.
+            input: Agent input.
+            initial_messages: Complete message history from the entry call.
+            initial_tool_calls: Tool calls already made in the entry call.
+            initial_iteration: Iteration counter starting point (default 1).
+            on_orchestrator_tool: Async callback for orchestrator-level tools.
+
+        Returns:
+            PhaseResult with the phase's output.
+        """
+        return await self.run(
+            phase=phase,
+            node=node,
+            workflow=workflow,
+            config=config,
+            input=input,
+            on_orchestrator_tool=on_orchestrator_tool,
+            _continuation_messages=initial_messages,
+            _continuation_tool_calls=initial_tool_calls,
+            _continuation_iteration=initial_iteration,
+        )
 
     async def run(
         self,
@@ -199,27 +224,40 @@ class PhaseRunner:
         Returns:
             PhaseResult with the phase's output.
         """
+        is_continuation = _continuation_messages is not None
+
         node.current_phase = phase
         max_iterations = self._phase_limits.get(phase, 10)
 
         # Set tool executor to current phase for filtering
         self._tool_executor.set_phase(phase)
 
-        # Get tools available in this phase (with circuit-breaker support)
-        phase_tools = self._tool_registry.get_for_phase(phase)
-        tool_schemas_by_name: Dict[str, dict] = {
-            t.name: t.to_llm_schema() for t in phase_tools
-        }
-        tool_consecutive_failures: Dict[str, int] = {}
+        if is_continuation:
+            # Continuation: use entry call tools (same set the agent already saw)
+            entry_tools = self._tool_registry.get_for_entry()
+            tool_schemas_by_name = {
+                t.name: t.to_llm_schema() for t in entry_tools
+            }
+            messages = list(_continuation_messages)
+        else:
+            # Normal: get phase-specific tools
+            phase_tools = self._tool_registry.get_for_phase(phase)
+            tool_schemas_by_name = {
+                t.name: t.to_llm_schema() for t in phase_tools
+            }
+            # Get tools visible (description-only) in this phase
+            visible_tools = self._tool_registry.get_visible_for_phase(phase)
+            # Build initial messages
+            messages = self._context_manager.build_phase_messages(
+                phase=phase,
+                config=config,
+                input=input,
+                working_memory_snapshot=working_memory_snapshot,
+                extra_context=extra_context,
+                visible_tools=visible_tools,
+            )
 
-        # Build initial messages
-        messages = self._context_manager.build_phase_messages(
-            phase=phase,
-            config=config,
-            input=input,
-            working_memory_snapshot=working_memory_snapshot,
-            extra_context=extra_context,
-        )
+        tool_consecutive_failures: Dict[str, int] = {}
 
         # Emit phase started
         await self._event_bus.publish(phase_started(
@@ -231,22 +269,19 @@ class PhaseRunner:
         ))
 
         result = PhaseResult(phase=phase)
+        if _continuation_tool_calls:
+            result.tool_calls_made = list(_continuation_tool_calls)
         self._in_progress_result = result
-        iteration = 0
-        _consecutive_stall_iterations = 0
-        _consecutive_fw_only_iterations = 0
+        iteration = _continuation_iteration
         _cumulative_tokens = 0
-        # Duplicate tool call detection state
-        _recent_iteration_signatures: List[Set[str]] = []
-        _consecutive_duplicate_iterations = 0
         _budget_warning_injected = False
         _iteration_advisory_injected = False
         _iteration_warning_injected = False
         _progress_injected = False
         _mandatory_nudge_given = False
         _circuit_breaker_warnings: Set[str] = set()
-        _duplicate_warning_injected = False
-        _stall_warning_injected = False
+        # Reset stall detector state for this phase
+        self._stall_detector.reset()
         # Iteration limit awareness thresholds.
         # Advisory fires first (a few iterations before the end),
         # warning fires on the penultimate iteration.
@@ -329,15 +364,36 @@ class PhaseRunner:
                 if tool_consecutive_failures.get(name, 0) < self._stall.max_consecutive_tool_failures
             ]
 
-            # Call LLM
-            response = await self._llm.chat_with_tools(
-                messages=messages,
-                tools=active_tool_schemas,
-                model=config.model,
-                model_config=config.model_config,
-                stream=self._stream,
-                on_token=on_token_cb,
-            )
+            # Call LLM (with error capture for terminal failures)
+            try:
+                response = await self._llm.chat_with_tools(
+                    messages=messages,
+                    tools=active_tool_schemas,
+                    model=config.model,
+                    model_config=config.model_config,
+                    stream=self._stream,
+                    on_token=on_token_cb,
+                )
+            except (RuntimeError, Exception) as llm_error:
+                # LLM call failed after all retries — record the error
+                _llm_error_record = {
+                    "phase": phase.value,
+                    "iteration": iteration,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "response_content": None,
+                    "tool_calls": None,
+                    "error": str(llm_error),
+                    "cumulative_tokens": _cumulative_tokens,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                result.llm_calls.append(_llm_error_record)
+                if self._on_llm_call_persisted:
+                    try:
+                        self._on_llm_call_persisted(_llm_error_record)
+                    except Exception:
+                        pass
+                raise
 
             # Track usage — record_usage returns the calculated cost and
             # also sets it on the usage object, making the flow explicit.
@@ -540,52 +596,24 @@ class PhaseRunner:
                         node.agent_id,
                     )
 
-                # ── Duplicate tool call detection ──────────────────────
-                # Track (tool_name, args_hash) signatures per iteration.
-                # If ALL calls in the last N iterations were already seen
-                # in the recent window, the agent is stuck in a loop.
-                _iter_sigs: Set[str] = set()
-                for tc in response.tool_calls:
-                    _iter_sigs.add(_hash_tool_call(tc.name, tc.arguments))
+                # ── Stall detection (delegated to StallDetector) ──────
+                verdict = self._stall_detector.check_iteration(response.tool_calls)
 
-                _all_seen_before = False
-                if _recent_iteration_signatures:
-                    _historical_sigs: Set[str] = set()
-                    for prev_sigs in _recent_iteration_signatures[-self._stall.duplicate_call_window:]:
-                        _historical_sigs.update(prev_sigs)
-                    _all_seen_before = _iter_sigs.issubset(_historical_sigs)
-
-                _recent_iteration_signatures.append(_iter_sigs)
-
-                if _all_seen_before:
-                    _consecutive_duplicate_iterations += 1
-                else:
-                    _consecutive_duplicate_iterations = 0
-
-                # Advisory at 2 consecutive duplicate iterations
-                if (_consecutive_duplicate_iterations == 2
-                        and not _duplicate_warning_injected):
-                    _duplicate_warning_injected = True
+                if verdict.should_warn and verdict.warning_message:
                     messages.append(Message(
                         role=MessageRole.USER,
-                        content=(
-                            "[DUPLICATE CALL WARNING] You have been making the "
-                            "same tool calls repeatedly for 2 iterations. This "
-                            "pattern suggests a loop. Consider: (1) using "
-                            "different parameters, (2) trying a different tool, "
-                            "or (3) producing your final response if you have "
-                            "enough data. The phase will be force-completed if "
-                            "this pattern continues."
-                        ),
+                        content=verdict.warning_message,
                     ))
+                    # Annotate the LLM call record so the UI can show
+                    # stall warnings on per-iteration blocks.
+                    if result.llm_calls:
+                        result.llm_calls[-1]["stall_warning"] = verdict.reason
 
-                if _consecutive_duplicate_iterations >= self._stall.max_duplicate_call_iterations:
+                if verdict.is_stalled:
                     logger.warning(
-                        f"Duplicate tool call loop detected: "
-                        f"{_consecutive_duplicate_iterations} consecutive "
-                        f"iterations with only previously-seen (tool, args) "
-                        f"pairs in {phase.value} for agent {node.agent_id}. "
-                        f"Forcing phase completion."
+                        f"Stall detected ({verdict.reason}): "
+                        f"forcing phase completion in "
+                        f"{phase.value} for agent {node.agent_id}."
                     )
                     result.iterations = iteration
                     result.hit_iteration_limit = True
@@ -596,101 +624,10 @@ class PhaseRunner:
                         task_id=node.task_id,
                         agent_id=node.agent_id,
                         phase=phase.value,
-                        limit=self._stall.max_duplicate_call_iterations,
+                        limit=max_iterations,
                     ))
 
                     return result
-
-                if has_non_framework_calls:
-                    _consecutive_stall_iterations = 0
-                    _consecutive_fw_only_iterations = 0
-                else:
-                    tools_this_iteration = {tc.name for tc in response.tool_calls}
-
-                    # Progress-producing framework tools (log_finding,
-                    # mark_todo_complete, review_checklist, submit_report)
-                    # represent genuine work — they record analysis output or
-                    # advance execution state.  When present, reset the
-                    # framework-only counter so tasks without domain tools
-                    # aren't force-stopped while making real progress.
-                    has_progress_tools = bool(
-                        tools_this_iteration & _PROGRESS_FRAMEWORK_TOOLS
-                    )
-                    if has_progress_tools:
-                        _consecutive_fw_only_iterations = 0
-                    else:
-                        _consecutive_fw_only_iterations += 1
-
-                    # Check if this framework-only iteration is purely
-                    # read-only (no state change at all).
-                    made_progress = bool(
-                        tools_this_iteration - _READ_ONLY_FRAMEWORK_TOOLS
-                    )
-
-                    if made_progress:
-                        _consecutive_stall_iterations = 0
-                    else:
-                        _consecutive_stall_iterations += 1
-
-                    # Two stall limits:
-                    # 1. Read-only stall: fast detection (5 iters of get_todo_list)
-                    # 2. Framework-only cap: catches loops of state-changing
-                    #    framework tools (update_todo_list, create_todo_list)
-                    #    that evade the read-only detector.  Progress-producing
-                    #    tools reset this counter, so only pure bookkeeping
-                    #    loops are caught.
-
-                    # Advisory warning before force-completion
-                    _approaching_stall = (
-                        _consecutive_stall_iterations == self._stall.max_framework_stall_iterations - 2
-                        or _consecutive_fw_only_iterations == self._stall.max_fw_only_consecutive_iterations - 2
-                    )
-                    if _approaching_stall and not _stall_warning_injected:
-                        _stall_warning_injected = True
-                        messages.append(Message(
-                            role=MessageRole.USER,
-                            content=(
-                                "[STALL WARNING] You have been calling only "
-                                "framework tools (get_todo_list, get_findings, "
-                                "etc.) without making progress with domain tools. "
-                                "This pattern suggests you may be stuck. Consider: "
-                                "(1) calling domain tools to fetch or process data, "
-                                "(2) using log_finding or mark_todo_complete to "
-                                "record progress, or (3) producing your final "
-                                "response. The phase will be force-completed if "
-                                "no domain tool progress is detected soon."
-                            ),
-                        ))
-
-                    _hit_stall = (
-                        _consecutive_stall_iterations >= self._stall.max_framework_stall_iterations
-                        or _consecutive_fw_only_iterations >= self._stall.max_fw_only_consecutive_iterations
-                    )
-                    if _hit_stall:
-                        _reason = (
-                            "read-only stall" if _consecutive_stall_iterations >= self._stall.max_framework_stall_iterations
-                            else "framework-only loop"
-                        )
-                        logger.warning(
-                            f"Framework stall detected ({_reason}): "
-                            f"{_consecutive_fw_only_iterations} consecutive "
-                            f"framework-only iterations in "
-                            f"{phase.value} for agent {node.agent_id}. "
-                            f"Forcing phase completion."
-                        )
-                        result.iterations = iteration
-                        result.hit_iteration_limit = True
-                        result.content = self._extract_best_effort(messages)
-
-                        await self._event_bus.publish(phase_iteration_limit(
-                            workflow_id=workflow.workflow_id,
-                            task_id=node.task_id,
-                            agent_id=node.agent_id,
-                            phase=phase.value,
-                            limit=self._stall.max_fw_only_consecutive_iterations,
-                        ))
-
-                        return result
 
                 # Check for context truncation
                 self._context_manager.last_compaction_info = None

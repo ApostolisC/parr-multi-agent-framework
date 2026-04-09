@@ -52,6 +52,7 @@ import yaml
 
 from ..adapters.domain_adapter import ReferenceDomainAdapter
 from ..core_types import (
+    AdaptiveFlowConfig,
     AgentConfig,
     BudgetConfig,
     CostConfig,
@@ -97,6 +98,7 @@ class ConfigBundle:
     simple_query_bypass: SimpleQueryBypassConfig = field(
         default_factory=SimpleQueryBypassConfig
     )
+    adaptive_flow: Optional[AdaptiveFlowConfig] = None
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +377,7 @@ def load_config(
     raw_stall = budget_data.get("stall_detection", {})
     raw_llm_rate_limit = budget_data.get("llm_rate_limit", {})
     raw_simple_query_bypass = budget_data.get("simple_query_bypass", {})
+    raw_adaptive_flow = budget_data.get("adaptive_flow", {})
     raw_roles = roles_data.get("roles", {})
 
     # -- Resolve tools (declarative vs legacy) -------------------------------
@@ -411,6 +414,7 @@ def load_config(
         llm_rate_limit=raw_llm_rate_limit,
         tool_names=list(built_tools.keys()),
         simple_query_bypass=raw_simple_query_bypass,
+        adaptive_flow=raw_adaptive_flow,
     )
     errors.extend(tools_errors)
     if errors:
@@ -433,6 +437,9 @@ def load_config(
 
     # -- Build simple-query bypass config ------------------------------------
     simple_query_bypass = _build_simple_query_bypass_config(raw_simple_query_bypass)
+
+    # -- Build adaptive flow config ------------------------------------------
+    adaptive_flow = _build_adaptive_flow_config(raw_adaptive_flow)
 
     # -- Build DomainAdapter -------------------------------------------------
     domain_adapter = _build_domain_adapter(
@@ -458,6 +465,7 @@ def load_config(
         + (f", provider={provider_config.provider_type}" if provider_config else "")
         + (", llm_rate_limit=enabled" if llm_rate_limit and llm_rate_limit.enabled else "")
         + (", simple_query_bypass=enabled" if simple_query_bypass.enabled else "")
+        + (", adaptive_flow=enabled" if adaptive_flow and adaptive_flow.enabled else "")
     )
 
     return ConfigBundle(
@@ -469,6 +477,7 @@ def load_config(
         stall_config=stall_config,
         llm_rate_limit=llm_rate_limit,
         simple_query_bypass=simple_query_bypass,
+        adaptive_flow=adaptive_flow,
     )
 
 
@@ -560,6 +569,18 @@ def _build_simple_query_bypass_config(raw_cfg: Dict[str, Any]) -> SimpleQueryByp
     )
 
 
+def _build_adaptive_flow_config(
+    raw_cfg: Dict[str, Any],
+) -> Optional[AdaptiveFlowConfig]:
+    """Build AdaptiveFlowConfig from parsed budget.yaml section."""
+    if not raw_cfg:
+        return None
+    return AdaptiveFlowConfig(
+        enabled=bool(raw_cfg.get("enabled", True)),
+        entry_phase_limit=int(raw_cfg.get("entry_phase_limit", 3)),
+    )
+
+
 def _build_phase_limits(raw_limits: Dict[str, Any]) -> Dict[Phase, int]:
     """Build phase limits dict from parsed YAML."""
     phase_map = {
@@ -617,6 +638,9 @@ def _build_domain_adapter(
         if role_def.get("report_template"):
             report_template = _read_text_file(config_dir, role_def["report_template"])
 
+        # Read direct-answer schema policy (optional)
+        direct_answer_schema_policy = role_def.get("direct_answer_schema_policy")
+
         # Register role
         adapter.register_role(
             role=role_name,
@@ -625,6 +649,7 @@ def _build_domain_adapter(
             output_schema=output_schema,
             report_template=report_template,
             description=role_def.get("description", ""),
+            direct_answer_schema_policy=direct_answer_schema_policy,
         )
 
         # Register sub-roles
@@ -700,6 +725,9 @@ def _register_sub_role(
     if sr_def.get("report_template"):
         report_template_override = _read_text_file(config_dir, sr_def["report_template"])
 
+    # Direct-answer schema policy override
+    da_policy_override = sr_def.get("direct_answer_schema_policy")
+
     adapter.register_sub_role(
         role=role_name,
         sub_role=sr_name,
@@ -708,6 +736,7 @@ def _register_sub_role(
         tools_override=tools_override,
         output_schema_override=output_schema_override,
         report_template_override=report_template_override,
+        direct_answer_schema_policy_override=da_policy_override,
     )
 
 
@@ -767,12 +796,22 @@ def _build_tools_from_yaml(
         else:
             phase_availability = list(Phase)
 
+        # Parse phase_visibility (default: empty = auto-inferred)
+        vis_names = tool_def.get("phase_visibility")
+        if vis_names is not None:
+            phase_visibility = [
+                _PHASE_MAP[p] for p in vis_names if p in _PHASE_MAP
+            ]
+        else:
+            phase_visibility = []
+
         result[tool_name] = ToolDef(
             name=tool_name,
             description=tool_def.get("description", ""),
             parameters=tool_def.get("parameters", {"type": "object", "properties": {}}),
             handler=handler,
             phase_availability=phase_availability,
+            phase_visibility=phase_visibility,
             timeout_ms=tool_def.get("timeout_ms", 30000),
             max_calls_per_phase=tool_def.get("max_calls_per_phase"),
             output_schema=tool_def.get("output_schema"),
@@ -876,4 +915,5 @@ def create_orchestrator_from_config(
         stream=stream,
         stall_config=bundle.stall_config,
         simple_query_bypass=bundle.simple_query_bypass,
+        adaptive_config=bundle.adaptive_flow,
     )

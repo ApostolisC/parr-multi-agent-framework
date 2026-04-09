@@ -19,12 +19,14 @@ Full workflow with real domain tools (searches, reads, etc.)::
 """
 
 import argparse
+import dataclasses
 import importlib
 import logging
 
 from parr.core_types import ToolDef
 
-from .server import start_server
+from .data_source import FileSystemDataSource
+from .server import start_server, SSEHub, SSEEventSink
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +53,15 @@ def _build_workflow_runner(
     provider: str | None,
     model: str | None,
     tools_module: str | None = None,
+    event_sink: object | None = None,
 ):
     """
     Build an async workflow runner from a config directory.
 
-    Returns ``(runner_func, available_roles)`` where *runner_func* is an
-    ``async (task, role) -> AgentOutput`` callable and *available_roles*
-    is the list of role names extracted from ``roles.yaml``.
+    Returns ``(runner_func, available_roles, orchestrator)`` where
+    *runner_func* is an ``async (task, role) -> AgentOutput`` callable,
+    *available_roles* is the list of role names from ``roles.yaml``,
+    and *orchestrator* is the Orchestrator instance for management APIs.
     """
     from pathlib import Path
 
@@ -90,6 +94,7 @@ def _build_workflow_runner(
             tool_registry=tool_registry,
             provider_override=provider,
             model_override=model,
+            event_sink=event_sink,
         )
     except Exception as e:
         if tool_registry:
@@ -97,7 +102,7 @@ def _build_workflow_runner(
             raise
         # Fall back: build a minimal orchestrator without tool validation
         logger.warning(f"Full config load failed ({e}), building minimal orchestrator")
-        orchestrator = _build_minimal_orchestrator(config_path, provider, model)
+        orchestrator = _build_minimal_orchestrator(config_path, provider, model, event_sink)
 
     # Point persistence at the same directory the UI reads from
     orchestrator._persist_dir = persist_dir
@@ -105,10 +110,15 @@ def _build_workflow_runner(
     async def runner(task: str, role: str):
         return await orchestrator.start_workflow(task=task, role=role)
 
-    return runner, available_roles
+    async def continue_runner(task: str, role: str, additional_context: str):
+        return await orchestrator.start_workflow(
+            task=task, role=role, additional_context=additional_context,
+        )
+
+    return runner, continue_runner, available_roles, orchestrator
 
 
-def _build_minimal_orchestrator(config_path, provider: str | None, model: str | None):
+def _build_minimal_orchestrator(config_path, provider: str | None, model: str | None, event_sink: object | None = None):
     """Build an Orchestrator bypassing tool validation for CLI use."""
     import json
 
@@ -199,7 +209,59 @@ def _build_minimal_orchestrator(config_path, provider: str | None, model: str | 
         phase_limits=phase_limits,
         default_budget=default_budget,
         stall_config=stall_config,
+        event_sink=event_sink,
     )
+
+
+def _serialize_role_details(domain_adapter) -> list[dict]:
+    """Extract JSON-serializable role details from a domain adapter."""
+    roles = []
+    for role_name, entry in domain_adapter._roles.items():
+        role_info = {
+            "name": role_name,
+            "description": entry.description,
+            "model": entry.config.model,
+            "model_config": {
+                "temperature": entry.config.model_config.temperature,
+                "top_p": entry.config.model_config.top_p,
+                "max_tokens": entry.config.model_config.max_tokens,
+            },
+            "tools": [t.name for t in entry.tools],
+            "has_output_schema": entry.output_schema is not None,
+            "has_report_template": entry.report_template is not None,
+            "sub_roles": [
+                {"name": sr_name, "description": sr_entry.description}
+                for sr_name, sr_entry in entry.sub_roles.items()
+            ],
+        }
+        roles.append(role_info)
+    return roles
+
+
+def _serialize_tool_details(domain_adapter) -> list[dict]:
+    """Extract JSON-serializable tool metadata from a domain adapter."""
+    seen: set[str] = set()
+    tools = []
+    for entry in domain_adapter._roles.values():
+        for tool in entry.tools:
+            if tool.name in seen:
+                continue
+            seen.add(tool.name)
+            tools.append({
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+                "category": tool.category,
+                "is_framework_tool": tool.is_framework_tool,
+                "is_read_only": tool.is_read_only,
+                "phase_availability": [p.value for p in tool.phase_availability],
+            })
+    return tools
+
+
+def _serialize_budget(budget_config) -> dict:
+    """Convert a BudgetConfig dataclass to a JSON-serializable dict."""
+    return dataclasses.asdict(budget_config)
 
 
 def main() -> None:
@@ -248,21 +310,38 @@ def main() -> None:
     args = parser.parse_args()
 
     workflow_runner = None
+    continue_func = None
     available_roles = None
+    cancel_func = None
+    role_details: list[dict] = []
+    tool_details: list[dict] = []
+    budget_config: dict = {}
+    sse_hub = None
 
     if args.config_dir:
+        sse_hub = SSEHub()
+        event_sink = SSEEventSink(sse_hub)
         try:
-            workflow_runner, available_roles = _build_workflow_runner(
+            workflow_runner, continue_func, available_roles, orchestrator = _build_workflow_runner(
                 config_dir=args.config_dir,
                 persist_dir=args.persist_dir,
                 provider=args.provider,
                 model=args.model,
                 tools_module=args.tools_module,
+                event_sink=event_sink,
             )
+            cancel_func = orchestrator.cancel_workflow
+            if orchestrator._domain_adapter:
+                role_details = _serialize_role_details(orchestrator._domain_adapter)
+                tool_details = _serialize_tool_details(orchestrator._domain_adapter)
+            budget_config = _serialize_budget(orchestrator._default_budget)
             print(f"Workflow runner loaded from: {args.config_dir}")
         except Exception as e:
             logger.error(f"Failed to load config from {args.config_dir}: {e}", exc_info=True)
             print(f"WARNING: Could not load config — session creation disabled.\n  Error: {e}")
+            sse_hub = None  # disable SSE on config failure
+
+    data_source = FileSystemDataSource(args.persist_dir)
 
     start_server(
         persist_dir=args.persist_dir,
@@ -270,6 +349,13 @@ def main() -> None:
         port=args.port,
         workflow_runner=workflow_runner,
         available_roles=available_roles,
+        cancel_func=cancel_func,
+        continue_func=continue_func,
+        role_details=role_details,
+        tool_details=tool_details,
+        budget_config=budget_config,
+        sse_hub=sse_hub,
+        data_source=data_source,
     )
 
 
