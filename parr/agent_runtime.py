@@ -23,6 +23,9 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
+from jsonschema import validate as jsonschema_validate
+from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
+
 from .adapters.llm_adapter import ContentFilterError
 from .budget_tracker import BudgetExceededException, BudgetTracker
 from .context_manager import ContextManager
@@ -40,6 +43,7 @@ from .framework_tools import (
     build_act_tools,
     build_agent_management_tools,
     build_collection_tools,
+    build_coordination_tools,
     build_plan_tools,
     build_report_tools,
     build_review_tools,
@@ -65,6 +69,7 @@ from .core_types import (
     MessageRole,
     ModelConfig,
     Phase,
+    PhaseConfig,
     ReviewMode,
     SimpleQueryBypassConfig,
     StallDetectionConfig,
@@ -76,7 +81,7 @@ from .core_types import (
     generate_id,
     get_effort_spec,
 )
-from .protocols import ToolCallingLLM
+from .protocols import TextSummarizer, ToolCallingLLM
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +128,10 @@ class AgentRuntime:
         agent_file_store: Optional[AgentFileStore] = None,
         review_mode: str = "thorough",
         effort_level: Optional[int] = None,
+        output_validator: Optional[OutputValidator] = None,
+        adaptive_config: Optional[AdaptiveFlowConfig] = None,
+        phase_config: Optional[PhaseConfig] = None,
+        summarizer: Optional[TextSummarizer] = None,
     ) -> None:
         self._llm = llm
         self._budget_tracker = budget_tracker
@@ -137,6 +146,7 @@ class AgentRuntime:
         self._file_store = agent_file_store
         self._output_validator = output_validator or JsonSchemaValidator()
         self._adaptive_config = adaptive_config
+        self._summarizer = summarizer
         # PhaseConfig: if provided, takes precedence; otherwise built from legacy params
         if phase_config is not None:
             self._phase_config = phase_config
@@ -152,12 +162,17 @@ class AgentRuntime:
         # Derive phase pipeline from effort_level when provided;
         # otherwise fall back to the legacy review_mode parameter
         # for full backward compatibility.
+        #
+        # When an explicit ``phase_config`` was given, it is the source
+        # of truth for ``_max_review_cycles`` — neither the effort_level
+        # spec nor the legacy ``max_review_cycles`` arg may overwrite it.
         if effort_level is not None:
             phases, review_mode_enum, max_retries = get_effort_spec(effort_level)
             self._effort_level = effort_level
             self._active_phases = phases
             self._review_mode_enum = review_mode_enum
-            self._max_review_cycles = max_retries
+            if phase_config is None:
+                self._max_review_cycles = max_retries
             logger.info(
                 "[PARR] AgentRuntime: effort_level=%d → phases=%s",
                 effort_level, [p.value for p in phases],
@@ -169,7 +184,8 @@ class AgentRuntime:
                 review_mode if review_mode in self.REVIEW_MODES else "thorough",
                 ReviewMode.STRICT,
             )
-            self._max_review_cycles = max_review_cycles
+            if phase_config is None:
+                self._max_review_cycles = max_review_cycles
             logger.info(
                 "[PARR] AgentRuntime: effort_level=None → legacy mode, all phases, review_mode=%s",
                 review_mode,
@@ -205,13 +221,41 @@ class AgentRuntime:
         task_id = node.task_id
 
         # Set up working memory for this agent
-        memory = AgentWorkingMemory()
+        snapshot_cap = (
+            self._budget_config.snapshot_max_items_per_collection
+            if self._budget_config else None
+        )
+        sor_threshold = (
+            self._budget_config.summarize_on_read_threshold_chars
+            if self._budget_config else 0
+        )
+        sor_default_instructions = (
+            self._budget_config.default_summary_instructions
+            if self._budget_config else None
+        )
+        memory = AgentWorkingMemory(
+            snapshot_max_items_per_collection=snapshot_cap,
+            summarizer=self._summarizer,
+            summarize_threshold_chars=sor_threshold,
+            default_summary_instructions=sor_default_instructions,
+        )
 
         # Build tool registry with framework + domain tools
         registry = self._build_tool_registry(memory, input.tools, node, input.output_schema)
 
+        # Optional read-only result cache. Installed when budget.yaml's
+        # result_cache.enabled is true. Per-agent instance so caches
+        # never bleed across siblings.
+        result_cache_mw: List[Any] = []
+        if self._budget_config and self._budget_config.result_cache_enabled:
+            from .result_cache_middleware import ResultCacheMiddleware
+            result_cache_mw.append(ResultCacheMiddleware(
+                scope=self._budget_config.result_cache_scope,
+                max_entries=self._budget_config.result_cache_max_entries,
+            ))
+
         # Set up components
-        tool_executor = ToolExecutor(registry)
+        tool_executor = ToolExecutor(registry, middleware=result_cache_mw or None)
         # Estimate tool schema overhead: ~150 tokens per registered tool
         tool_schema_overhead = len(registry.get_all()) * 150
         context_manager = ContextManager(
@@ -256,6 +300,8 @@ class AgentRuntime:
             stream=self._stream,
             stall_config=self._stall_config,
             file_store=self._file_store,
+            on_tool_persisted=_on_tool_persisted,
+            on_llm_call_persisted=_on_llm_call_persisted,
         )
 
         # Emit agent started
@@ -1065,6 +1111,15 @@ class AgentRuntime:
             default_sub_role=node.config.sub_role,
         ):
             registry.register(tool)
+
+        # Level 0 agents run ACT only — submit_report must be available in
+        # ACT since the REPORT phase doesn't exist. Override the default
+        # REPORT-only availability.
+        if self._effort_level == 0:
+            submit_tool = registry.get("submit_report")
+            if submit_tool:
+                submit_tool.phase_availability = [Phase.ACT]
+
         for tool in build_collection_tools(memory):
             registry.register(tool)
 
@@ -1086,8 +1141,12 @@ class AgentRuntime:
             registry.register(tool)
 
         # Transition tools (set_next_phase — adaptive flow)
-        for tool in build_transition_tools(memory):
-            registry.register(tool)
+        # Level 0 agents have a single-phase pipeline [ACT] — there is no
+        # next phase to transition to, so set_next_phase is hidden to avoid
+        # wasting the agent's tool calls on a no-op.
+        if self._effort_level != 0:
+            for tool in build_transition_tools(memory):
+                registry.register(tool)
 
         # Domain tools from input — validate no shadowing of framework tools
         framework_names = set(registry.tool_names)
@@ -1333,6 +1392,8 @@ class AgentRuntime:
         )
         total_usage.input_tokens += usage.input_tokens
         total_usage.output_tokens += usage.output_tokens
+        total_usage.cache_creation_input_tokens += usage.cache_creation_input_tokens
+        total_usage.cache_read_input_tokens += usage.cache_read_input_tokens
         total_usage.total_cost += cost
 
         # Persist entry LLM call record for debug UI visibility
@@ -1398,7 +1459,7 @@ class AgentRuntime:
             # Check if this is an orchestrator-level tool
             tool_def = registry.get(tc.name)
             if tool_def and tool_def.is_orchestrator_tool and on_orchestrator_tool:
-                result = await on_orchestrator_tool(tc)
+                result = await on_orchestrator_tool(tc, tool_executor)
             else:
                 result = await tool_executor.execute(tc)
 
@@ -1574,21 +1635,31 @@ class AgentRuntime:
                 self._MAX_PHASE_TRANSITIONS, config.agent_id,
             )
 
-        # 9. Always run REPORT as the final phase
-        report_result = await self._execute_phase_with_bookkeeping(
-            phase_runner=phase_runner,
-            phase=Phase.REPORT,
-            node=node,
-            workflow=workflow,
-            config=config,
-            input=input,
-            context_manager=context_manager,
-            memory=memory,
-            on_orchestrator_tool=on_orchestrator_tool,
-            execution_metadata=execution_metadata,
-            total_usage=total_usage,
-            phases_hitting_limit=phases_hitting_limit,
-        )
+        # 9. Run REPORT — unless the agent already submitted in a prior phase
+        #    (Level 0 agents submit in ACT; running REPORT with fresh context
+        #    would cause the model to try to redo everything from scratch).
+        if not memory.submitted_report:
+            report_result = await self._execute_phase_with_bookkeeping(
+                phase_runner=phase_runner,
+                phase=Phase.REPORT,
+                node=node,
+                workflow=workflow,
+                config=config,
+                input=input,
+                context_manager=context_manager,
+                memory=memory,
+                on_orchestrator_tool=on_orchestrator_tool,
+                execution_metadata=execution_metadata,
+                total_usage=total_usage,
+                phases_hitting_limit=phases_hitting_limit,
+            )
+        else:
+            report_result = None
+            logger.info(
+                "Skipping REPORT phase for agent %s — report already submitted "
+                "in a prior phase.",
+                config.agent_id,
+            )
 
         # 10. Validate output
         if memory.submitted_report:
@@ -1997,6 +2068,8 @@ class AgentRuntime:
         cost = self._budget_tracker.record_usage(node, workflow, usage, config.model)
         total_usage.input_tokens += usage.input_tokens
         total_usage.output_tokens += usage.output_tokens
+        total_usage.cache_creation_input_tokens += usage.cache_creation_input_tokens
+        total_usage.cache_read_input_tokens += usage.cache_read_input_tokens
         total_usage.total_cost += cost
         return response
 
@@ -2273,8 +2346,16 @@ class AgentRuntime:
         elif report_content:
             findings = {"report_text": report_content}
 
-        # Build summary from findings + report content
-        summary = report_content or "Agent completed without producing a text summary."
+        # Build summary from submitted report or last text output.
+        # Prefer the report's own summary/markdown over the phase's last text
+        # (which may just be "Report submitted successfully.").
+        summary = ""
+        if memory.submitted_report:
+            sr = memory.submitted_report
+            # Try report_markdown (coordinator), then summary (sub-agents)
+            summary = sr.get("report_markdown", "") or sr.get("summary", "")
+        if not summary:
+            summary = report_content or "Agent completed without producing a text summary."
         if len(summary) > 500:
             summary = summary[:500] + "..."
 

@@ -18,6 +18,37 @@ budget_defaults:
   max_child_review_cycles: ~          # Max review cycles for child agents (null = use parent's)
   context_soft_compaction_pct: 0.40   # Trigger soft compaction at this % of context window
   context_hard_truncation_pct: 0.65   # Trigger hard truncation at this % of context window
+  # Cap items rendered per memory collection in the working memory snapshot.
+  # Null = unlimited (legacy behavior). Set to a small int (e.g. 20) to keep
+  # snapshots compact when collections grow large; agents see only the most
+  # recent N items per collection plus a hint pointing them at list_collection
+  # / get_collection for the rest.
+  snapshot_max_items_per_collection: ~
+  # Result cache (per-agent dedup of read-only tool results).
+  # When enabled, the framework installs a ResultCacheMiddleware that
+  # short-circuits successful read-only tool calls when invoked with
+  # identical args inside the cache scope.
+  #   scope: 'phase' clears on every phase boundary, 'agent' keeps for
+  #          the agent lifetime.
+  #   max_entries: LRU cap. null = unbounded.
+  result_cache:
+    enabled: true
+    scope: phase
+    max_entries: 256
+  # Summarize-on-read for collection reads. When the agent calls
+  # get_collection without an explicit summarize=true/false, the
+  # framework auto-summarizes if the collection's total content
+  # exceeds threshold_chars. Requires a TextSummarizer to be wired
+  # through Orchestrator(summarizer=...). 0 disables auto (the agent
+  # must pass summarize=true explicitly to opt in).
+  #   threshold_chars: int (chars). Shorthand: pass an int directly
+  #     instead of the {threshold_chars: ...} mapping.
+  #   default_instructions: optional steering passed to the summarizer
+  #     when the tool call provides none (e.g. "preserve all
+  #     quantified findings and source citations").
+  summarize_on_read:
+    threshold_chars: 0
+    default_instructions: ~
 
 # Iteration limits per phase. Each iteration = one LLM call (any tool call).
 # Both domain and framework tool calls count toward these limits.
@@ -35,6 +66,14 @@ llm_rate_limit:
   max_requests_per_minute: 1500
   max_queue_size: 100
   acquire_timeout_seconds: 30
+
+# Prompt cache markers (Anthropic-style explicit cache_control).
+# Azure/OpenAI use automatic prefix caching that requires no markers,
+# so this flag is a no-op for those providers — cache metrics are
+# still surfaced via prompt_tokens_details.cached_tokens.
+# Per-role override available via roles.yaml: model_config.prompt_caching.
+prompt_caching:
+  enabled: true
 
 simple_query_bypass:
   enabled: true

@@ -32,6 +32,7 @@ class ToolRegistry:
         """Register a tool. Raises ValueError if name already registered."""
         if tool.name in self._tools:
             raise ValueError(f"Tool '{tool.name}' is already registered")
+        self._ensure_strip_param(tool)
         self._tools[tool.name] = tool
         logger.debug(f"Registered tool: {tool.name}")
 
@@ -52,6 +53,7 @@ class ToolRegistry:
             a new registration.
         """
         previous = self._tools.get(tool.name)
+        self._ensure_strip_param(tool)
         self._tools[tool.name] = tool
         if previous is not None:
             logger.info(f"Overrode tool: {tool.name}")
@@ -146,6 +148,31 @@ class ToolRegistry:
             tool for tool in self._tools.values()
             if tool.is_orchestrator_tool
         ]
+
+    @staticmethod
+    def _ensure_strip_param(tool: ToolDef) -> None:
+        """Auto-inject ``strip_input_after_dispatch`` into the tool schema.
+
+        Every tool gets this optional boolean so the LLM can override
+        per-call whether heavy input fields are stripped from its
+        conversation history after dispatch.  Idempotent — skips tools
+        that already declare the parameter explicitly.
+        """
+        props = tool.parameters.get("properties")
+        if not isinstance(props, dict):
+            return
+        if "strip_input_after_dispatch" in props:
+            return  # already explicitly defined
+        props["strip_input_after_dispatch"] = {
+            "type": "boolean",
+            "description": (
+                "Override whether this tool's heavy input fields are "
+                "stripped from your conversation history after dispatch. "
+                "Defaults to the tool's configured behavior. Set to false "
+                "on a spawn_agent call if you genuinely need to refer "
+                "back to the spawn args later."
+            ),
+        }
 
     def has_tool(self, name: str) -> bool:
         """Check if a tool is registered."""

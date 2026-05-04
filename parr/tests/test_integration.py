@@ -294,7 +294,9 @@ class TestSilentFailureFixes:
                 event_type="test_event",
             ))
 
-        asyncio.get_event_loop().run_until_complete(_run())
+        # asyncio.get_event_loop() no longer auto-creates a loop in
+        # Python 3.12+. Use asyncio.run() instead.
+        asyncio.run(_run())
         assert len(errors) == 1
         assert isinstance(errors[0][1], ValueError)
 

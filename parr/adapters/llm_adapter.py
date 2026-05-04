@@ -452,10 +452,20 @@ class OpenAIToolCallingLLM:
                     arguments=arguments,
                 ))
 
-        # Token usage
+        # Token usage. Azure/OpenAI report ``prompt_tokens`` as the all-in
+        # input total, and (when prompt caching is active and the prefix
+        # was ≥1024 tokens) expose the cached slice as
+        # ``prompt_tokens_details.cached_tokens``. Adapters that don't
+        # surface cache metrics leave the field at 0 → the cost calc
+        # falls back to charging all input at the full price.
+        cached_tokens = 0
+        details = getattr(response.usage, "prompt_tokens_details", None)
+        if details is not None:
+            cached_tokens = getattr(details, "cached_tokens", 0) or 0
         usage = TokenUsage(
             input_tokens=response.usage.prompt_tokens,
             output_tokens=response.usage.completion_tokens,
+            cache_read_input_tokens=cached_tokens,
         )
         if self._cost_config:
             usage.total_cost = self._cost_config.calculate_cost(
@@ -559,6 +569,10 @@ class OpenAIToolCallingLLM:
             if usage_data:
                 usage.input_tokens = getattr(usage_data, "prompt_tokens", 0)
                 usage.output_tokens = getattr(usage_data, "completion_tokens", 0)
+                # Surface Azure/OpenAI prompt cache hits when present.
+                _details = getattr(usage_data, "prompt_tokens_details", None)
+                if _details is not None:
+                    usage.cache_read_input_tokens = getattr(_details, "cached_tokens", 0) or 0
                 if self._cost_config:
                     usage.total_cost = self._cost_config.calculate_cost(
                         self._model, usage
@@ -612,6 +626,21 @@ class AnthropicToolCallingLLM:
 
     Uses async client to avoid blocking the event loop during multi-agent
     workflows.
+
+    **Prompt caching.** When ``prompt_caching=True``, the adapter inserts
+    ``cache_control: {"type": "ephemeral"}`` markers on the two most stable
+    parts of the request:
+
+    1. The system prompt (rarely changes within a phase).
+    2. The first user message (typically the working-memory snapshot
+       injected once per phase by the agent runtime).
+
+    These two markers create a single cached prefix the model can re-use
+    on every turn within a phase, billed at ~10% of the normal input price.
+    Caching is opt-in because (a) Anthropic charges a small write premium
+    on the first hit and (b) users on Anthropic-compatible providers may
+    not support the markers. The default is ``False`` so behaviour is
+    backwards-compatible — turn it on via the LLM factory or per-role config.
     """
 
     def __init__(
@@ -619,16 +648,21 @@ class AnthropicToolCallingLLM:
         client: Any,
         model: str,
         cost_config: Optional[CostConfig] = None,
+        prompt_caching: bool = False,
     ) -> None:
         """
         Args:
             client: An ``anthropic.AsyncAnthropic`` instance.
             model: Model identifier (e.g. "claude-3-5-sonnet-20241022").
             cost_config: Optional pricing config for cost tracking.
+            prompt_caching: When True, insert ``cache_control`` markers
+                on the system prompt and first user message so Anthropic
+                can serve repeated calls from its prompt cache.
         """
         self._client = client
         self._model = model
         self._cost_config = cost_config
+        self._prompt_caching = prompt_caching
 
     # -- public API (ToolCallingLLM protocol) --------------------------------
 
@@ -645,6 +679,14 @@ class AnthropicToolCallingLLM:
         system_prompt, api_messages = self._translate_messages(messages)
         api_tools = self._translate_tools(tools) if tools else []
 
+        # Per-role override (model_config.prompt_caching) wins over the
+        # adapter's constructor default. None = use the global default.
+        caching_enabled = (
+            model_config.prompt_caching
+            if model_config.prompt_caching is not None
+            else self._prompt_caching
+        )
+
         create_kwargs: Dict[str, Any] = {
             "model": model or self._model,
             "max_tokens": model_config.max_tokens,
@@ -654,9 +696,28 @@ class AnthropicToolCallingLLM:
         }
 
         if system_prompt:
-            create_kwargs["system"] = system_prompt
+            # When prompt caching is enabled, send the system prompt as a
+            # block list with a cache_control marker so Anthropic caches
+            # everything up to and including the system prompt. Otherwise
+            # send it as a plain string for forward-compat with providers
+            # that don't support block-style system prompts.
+            if caching_enabled:
+                create_kwargs["system"] = [{
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }]
+            else:
+                create_kwargs["system"] = system_prompt
         if api_tools:
             create_kwargs["tools"] = api_tools
+
+        # When caching is enabled, also mark the first user message
+        # (the working-memory snapshot) so the cached prefix extends to
+        # the snapshot — every subsequent turn within a phase reads
+        # from the cache instead of re-sending the snapshot.
+        if caching_enabled:
+            self._apply_first_user_cache_marker(api_messages)
 
         if stream:
             return await self._stream_response(create_kwargs, on_token)
@@ -752,6 +813,48 @@ class AnthropicToolCallingLLM:
         system_prompt = "\n\n".join(system_parts) if system_parts else None
         return system_prompt, api_messages
 
+    @staticmethod
+    def _apply_first_user_cache_marker(api_messages: List[Dict[str, Any]]) -> None:
+        """Mark the first user message with ``cache_control: ephemeral``.
+
+        Mutates ``api_messages`` in place. The first user message is the
+        working-memory snapshot in PARR — re-injected at the start of each
+        phase, then stable for every iteration within that phase. Marking
+        it tells Anthropic to cache everything up to that point so each
+        iteration's repeated prefix is served from the cache.
+
+        Anthropic accepts ``cache_control`` on individual content blocks.
+        Plain-string content is converted to a single text block to attach
+        the marker.
+        """
+        for msg in api_messages:
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                msg["content"] = [{
+                    "type": "text",
+                    "text": content,
+                    "cache_control": {"type": "ephemeral"},
+                }]
+            elif isinstance(content, list) and content:
+                # Find the last text block; mark it. (cache_control on the
+                # last block of a section caches everything before AND
+                # including it.)
+                last_text_idx = -1
+                for i, block in enumerate(content):
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        last_text_idx = i
+                if last_text_idx == -1:
+                    # No text block — fall back to marking the last block
+                    # of any kind so the marker still applies somewhere.
+                    last_text_idx = len(content) - 1
+                target = content[last_text_idx]
+                if isinstance(target, dict):
+                    target["cache_control"] = {"type": "ephemeral"}
+            # Only mark the FIRST user message — break after the first one.
+            return
+
     def _translate_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Convert framework tool schemas to Anthropic tool format."""
         result = []
@@ -785,9 +888,18 @@ class AnthropicToolCallingLLM:
 
         content = "\n".join(content_parts) if content_parts else None
 
+        # Anthropic reports cache metrics on usage when explicit caching
+        # is in use. ``input_tokens`` from Anthropic excludes cache reads
+        # AND cache creation, so we sum them back to get the true total
+        # the framework expects (consistent with how OpenAI/Azure report
+        # ``prompt_tokens`` as the all-in input total).
+        cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
+        cache_create = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
         usage = TokenUsage(
-            input_tokens=response.usage.input_tokens,
+            input_tokens=response.usage.input_tokens + cache_read + cache_create,
             output_tokens=response.usage.output_tokens,
+            cache_creation_input_tokens=cache_create,
+            cache_read_input_tokens=cache_read,
         )
         if self._cost_config:
             usage.total_cost = self._cost_config.calculate_cost(
@@ -823,6 +935,8 @@ class AnthropicToolCallingLLM:
             current_tool: Optional[Dict[str, Any]] = None
             input_tokens = 0
             output_tokens = 0
+            cache_read_tokens = 0
+            cache_create_tokens = 0
 
             async with self._client.messages.stream(**create_kwargs) as stream:
                 async for event in stream:
@@ -830,7 +944,10 @@ class AnthropicToolCallingLLM:
 
                     if event_type == "message_start":
                         if hasattr(event, "message") and hasattr(event.message, "usage"):
-                            input_tokens = event.message.usage.input_tokens
+                            _u = event.message.usage
+                            input_tokens = _u.input_tokens
+                            cache_read_tokens = getattr(_u, "cache_read_input_tokens", 0) or 0
+                            cache_create_tokens = getattr(_u, "cache_creation_input_tokens", 0) or 0
 
                     elif event_type == "content_block_start":
                         block = event.content_block
@@ -871,9 +988,14 @@ class AnthropicToolCallingLLM:
                             output_tokens = event.usage.output_tokens
 
             content = "".join(content_parts) if content_parts else None
+            # Anthropic's input_tokens excludes cache reads/creation; sum
+            # them so the framework's "input total" is consistent across
+            # providers.
             usage = TokenUsage(
-                input_tokens=input_tokens,
+                input_tokens=input_tokens + cache_read_tokens + cache_create_tokens,
                 output_tokens=output_tokens,
+                cache_creation_input_tokens=cache_create_tokens,
+                cache_read_input_tokens=cache_read_tokens,
             )
             if self._cost_config:
                 usage.total_cost = self._cost_config.calculate_cost(
@@ -912,6 +1034,7 @@ def create_tool_calling_llm(
     model: str,
     cost_config: Optional[CostConfig] = None,
     llm_rate_limit: Optional[LLMRateLimitConfig] = None,
+    prompt_caching: bool = False,
     **kwargs: Any,
 ) -> Any:
     """
@@ -924,6 +1047,13 @@ def create_tool_calling_llm(
         model: Model name or deployment name.
         cost_config: Optional pricing config.
         llm_rate_limit: Optional global queue/rate-limit settings.
+        prompt_caching: When True and the provider supports explicit cache
+            markers (currently Anthropic only), insert ``cache_control``
+            markers on the system prompt and first user message so repeat
+            calls within a phase are served from the prompt cache. Azure
+            and OpenAI use automatic prefix caching that requires no
+            markers, so this flag is a no-op for those providers — cache
+            metrics are still surfaced via ``prompt_tokens_details``.
         **kwargs: Provider-specific arguments:
             - openai: api_key, timeout
             - azure_openai: endpoint, api_key, api_version, timeout
@@ -969,6 +1099,7 @@ def create_tool_calling_llm(
             client=client,
             model=model,
             cost_config=cost_config,
+            prompt_caching=prompt_caching,
         )
 
     else:

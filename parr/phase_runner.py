@@ -35,6 +35,7 @@ from .event_types import (
     context_compacted,
     llm_call_completed,
     phase_completed,
+    phase_injection,
     phase_iteration_limit,
     phase_started,
     tool_executed,
@@ -128,6 +129,8 @@ class PhaseRunner:
         stream: bool = False,
         stall_config: Optional[StallDetectionConfig] = None,
         file_store: Optional[AgentFileStore] = None,
+        on_tool_persisted: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_llm_call_persisted: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
         self._llm = llm
         self._tool_executor = tool_executor
@@ -138,6 +141,13 @@ class PhaseRunner:
         self._phase_limits = phase_limits or DEFAULT_PHASE_LIMITS
         self._stream = stream
         self._stall = stall_config or StallDetectionConfig()
+        # The stall detector instance keeps per-phase state (consecutive
+        # read-only iterations, duplicate-call signatures, etc.). Created
+        # once per PhaseRunner; reset() is called at the start of every phase.
+        self._stall_detector = StallDetector(
+            registry=tool_registry,
+            config=self._stall,
+        )
         self._file_store = file_store
         # Tracks the in-progress phase result so it can be recovered
         # when BudgetExceededException interrupts a phase mid-execution.
@@ -204,6 +214,12 @@ class PhaseRunner:
         extra_context: Optional[str] = None,
         on_orchestrator_tool: Optional[Callable] = None,
         phase_context: Optional[str] = None,
+        # Continuation kwargs (used by run_continuation to resume a phase
+        # from an existing message history — typically the adaptive entry
+        # call's output handed off to the detected phase as iteration 0).
+        _continuation_messages: Optional[List[Message]] = None,
+        _continuation_tool_calls: Optional[List[Dict[str, Any]]] = None,
+        _continuation_iteration: int = 1,
     ) -> PhaseResult:
         """
         Execute a single phase.
@@ -268,11 +284,25 @@ class PhaseRunner:
             context=phase_context,
         ))
 
+        # Surface any review-retry / re-prompt feedback that was merged
+        # into the initial user message. Without this, the UI has no way
+        # to show the agent "why" it is being asked to redo work.
         result = PhaseResult(phase=phase)
         if _continuation_tool_calls:
             result.tool_calls_made = list(_continuation_tool_calls)
         self._in_progress_result = result
         iteration = _continuation_iteration
+
+        if extra_context and not is_continuation:
+            await self._event_bus.publish(phase_injection(
+                workflow_id=workflow.workflow_id,
+                task_id=node.task_id,
+                agent_id=node.agent_id,
+                phase=phase.value,
+                kind="extra_context",
+                content=extra_context,
+                iteration=iteration,
+            ))
         _cumulative_tokens = 0
         _budget_warning_injected = False
         _iteration_advisory_injected = False
@@ -310,16 +340,21 @@ class PhaseRunner:
             if not _iteration_advisory_injected and iteration >= _advisory_threshold:
                 _iteration_advisory_injected = True
                 remaining = max_iterations - iteration
-                messages.append(Message(
-                    role=MessageRole.USER,
-                    content=(
+                await self._inject_user_message(
+                    messages,
+                    (
                         f"[ITERATION ADVISORY] You have used {iteration} of "
                         f"{max_iterations} iterations for this phase ({remaining} "
                         f"remaining). Consider wrapping up: prioritize the most "
                         f"important remaining work, and prepare to produce your "
                         f"final text response soon."
                     ),
-                ))
+                    kind="iteration_advisory",
+                    phase=phase,
+                    iteration=iteration,
+                    workflow=workflow,
+                    node=node,
+                )
                 logger.info(
                     f"Iteration advisory injected at iteration "
                     f"{iteration}/{max_iterations} in {phase.value} "
@@ -327,9 +362,9 @@ class PhaseRunner:
                 )
             if not _iteration_warning_injected and iteration >= _warn_threshold:
                 _iteration_warning_injected = True
-                messages.append(Message(
-                    role=MessageRole.USER,
-                    content=(
+                await self._inject_user_message(
+                    messages,
+                    (
                         f"[ITERATION WARNING] This is your last iteration "
                         f"({iteration}/{max_iterations}). You should produce "
                         f"your final text response now to complete this phase. "
@@ -337,7 +372,12 @@ class PhaseRunner:
                         f"one more tool call, but be aware the phase will end "
                         f"after this iteration."
                     ),
-                ))
+                    kind="iteration_warning",
+                    phase=phase,
+                    iteration=iteration,
+                    workflow=workflow,
+                    node=node,
+                )
                 logger.info(
                     f"Iteration warning injected at iteration "
                     f"{iteration}/{max_iterations} in {phase.value} "
@@ -401,6 +441,8 @@ class PhaseRunner:
             cost = self._budget_tracker.record_usage(node, workflow, usage, config.model)
             result.total_usage.input_tokens += usage.input_tokens
             result.total_usage.output_tokens += usage.output_tokens
+            result.total_usage.cache_creation_input_tokens += usage.cache_creation_input_tokens
+            result.total_usage.cache_read_input_tokens += usage.cache_read_input_tokens
             result.total_usage.total_cost += cost
 
             # Budget warning: nudge the LLM when approaching limits
@@ -408,14 +450,19 @@ class PhaseRunner:
                 _warning_msg = self._budget_tracker.check_warning_threshold(node)
                 if _warning_msg:
                     _budget_warning_injected = True
-                    messages.append(Message(
-                        role=MessageRole.USER,
-                        content=(
+                    await self._inject_user_message(
+                        messages,
+                        (
                             f"[BUDGET WARNING] Approaching budget limits: "
                             f"{_warning_msg}. Wrap up your current work "
                             f"efficiently and move toward completing this phase."
                         ),
-                    ))
+                        kind="budget_warning",
+                        phase=phase,
+                        iteration=iteration,
+                        workflow=workflow,
+                        node=node,
+                    )
                     await self._event_bus.publish(budget_warning(
                         workflow_id=workflow.workflow_id,
                         task_id=node.task_id,
@@ -445,6 +492,10 @@ class PhaseRunner:
                 response_content=response.content,
                 tool_calls=_event_tool_calls,
                 cumulative_tokens=_cumulative_tokens,
+                model=config.model,
+                cache_read_input_tokens=usage.cache_read_input_tokens,
+                cache_creation_input_tokens=usage.cache_creation_input_tokens,
+                cost=cost,
             ))
 
             # Catalog this LLM call to disk for debugging/analysis
@@ -502,7 +553,10 @@ class PhaseRunner:
                 # Otherwise we run all calls via asyncio.gather for I/O
                 # parallelism (overlapping DB queries, API calls).
                 has_non_framework_calls = False
-                _deferred_cb_messages: List[Message] = []
+                # Each entry pairs a circuit-breaker message with its kind
+                # (``tool_warning`` or ``tool_disabled``) so we can emit a
+                # ``phase_injection`` event after extending ``messages``.
+                _deferred_cb_messages: List[Tuple[Message, str]] = []
 
                 has_orchestrator = any(
                     (td := self._tool_registry.get(tc.name)) and td.is_orchestrator_tool
@@ -526,6 +580,7 @@ class PhaseRunner:
                     ))
 
                     # Process results in original order
+                    _phase_terminated = False
                     for tool_call, tool_result in zip(response.tool_calls, tool_results):
                         self._process_tool_result(
                             tool_call, tool_result, messages, result, phase,
@@ -538,8 +593,11 @@ class PhaseRunner:
                             _domain_tool_calls += 1
                         else:
                             _framework_tool_calls += 1
+                        if tool_def and tool_def.terminates_phase and tool_result.success:
+                            _phase_terminated = True
                 else:
                     # --- SEQUENTIAL EXECUTION ---
+                    _phase_terminated = False
                     for tool_call in response.tool_calls:
                         if node.status == AgentStatus.CANCELLED:
                             raise CancelledException(f"Agent {node.agent_id} was cancelled")
@@ -563,10 +621,30 @@ class PhaseRunner:
                             _domain_tool_calls += 1
                         else:
                             _framework_tool_calls += 1
+                        if tool_def and tool_def.terminates_phase and tool_result.success:
+                            _phase_terminated = True
+
+                # Phase-terminating tool succeeded — end immediately
+                if _phase_terminated:
+                    result.iterations = iteration + 1
+                    result.content = messages[-1].content if messages else ""
+                    return result
 
                 # Append deferred circuit-breaker messages after all tool
                 # results, so we don't break the assistant→tool pairing.
-                messages.extend(_deferred_cb_messages)
+                # Emit a phase_injection event for each so the UI can show
+                # the guidance the agent will see on its next turn.
+                for _cb_msg, _cb_kind in _deferred_cb_messages:
+                    messages.append(_cb_msg)
+                    await self._event_bus.publish(phase_injection(
+                        workflow_id=workflow.workflow_id,
+                        task_id=node.task_id,
+                        agent_id=node.agent_id,
+                        phase=phase.value,
+                        kind=_cb_kind,
+                        content=_cb_msg.content or "",
+                        iteration=iteration,
+                    ))
 
                 # Always count every LLM-call iteration toward the phase limit.
                 # Phase limits are hard caps that must be respected regardless
@@ -579,16 +657,21 @@ class PhaseRunner:
                         and not _iteration_warning_injected
                         and iteration == _mid_threshold):
                     _progress_injected = True
-                    messages.append(Message(
-                        role=MessageRole.USER,
-                        content=(
+                    await self._inject_user_message(
+                        messages,
+                        (
                             f"[PROGRESS] Iteration {iteration}/{max_iterations}. "
                             f"Tool calls so far: {_domain_tool_calls} domain, "
                             f"{_framework_tool_calls} framework. "
                             f"Use remaining iterations wisely — "
                             f"prefer domain tools for actual work."
                         ),
-                    ))
+                        kind="progress",
+                        phase=phase,
+                        iteration=iteration,
+                        workflow=workflow,
+                        node=node,
+                    )
                     logger.debug(
                         "Iteration awareness injected at %d/%d in %s "
                         "for agent %s",
@@ -600,10 +683,15 @@ class PhaseRunner:
                 verdict = self._stall_detector.check_iteration(response.tool_calls)
 
                 if verdict.should_warn and verdict.warning_message:
-                    messages.append(Message(
-                        role=MessageRole.USER,
-                        content=verdict.warning_message,
-                    ))
+                    await self._inject_user_message(
+                        messages,
+                        verdict.warning_message,
+                        kind="stall_warning",
+                        phase=phase,
+                        iteration=iteration,
+                        workflow=workflow,
+                        node=node,
+                    )
                     # Annotate the LLM call record so the UI can show
                     # stall warnings on per-iteration blocks.
                     if result.llm_calls:
@@ -671,14 +759,19 @@ class PhaseRunner:
                             role=MessageRole.ASSISTANT,
                             content=response.content,
                         ))
-                        messages.append(Message(
-                            role=MessageRole.USER,
-                            content=(
+                        await self._inject_user_message(
+                            messages,
+                            (
                                 f"You have not called the following mandatory tools: "
                                 f"{', '.join(uncalled_mandatory)}. You MUST call them "
                                 f"before completing this phase."
                             ),
-                        ))
+                            kind="mandatory_nudge",
+                            phase=phase,
+                            iteration=iteration,
+                            workflow=workflow,
+                            node=node,
+                        )
                         iteration += 1
                         continue
 
@@ -716,7 +809,7 @@ class PhaseRunner:
         phase: Phase,
         tool_consecutive_failures: Dict[str, int],
         circuit_breaker_warnings: Set[str],
-        deferred_cb_messages: List[Message],
+        deferred_cb_messages: List[Tuple[Message, str]],
     ) -> None:
         """Append tool result message and update tracking/circuit-breaker state."""
         messages.append(Message(
@@ -725,14 +818,25 @@ class PhaseRunner:
             tool_call_id=tool_result.tool_call_id,
         ))
 
-        result.tool_calls_made.append({
+        tool_record = {
             "name": tool_call.name,
             "phase": phase.value,
             "arguments": tool_call.arguments,
             "result_content": tool_result.content,
             "success": tool_result.success,
             "error": tool_result.error,
-        })
+        }
+        result.tool_calls_made.append(tool_record)
+
+        # Incremental persistence callback — fires once per tool call so
+        # the AgentRuntime can flush the record to its file_store and
+        # surface live updates in the debug UI. Errors in the callback
+        # must not break phase execution.
+        if self._on_tool_persisted is not None:
+            try:
+                self._on_tool_persisted(tool_record)
+            except Exception as e:
+                logger.debug("on_tool_persisted callback failed: %s", e)
 
         # Circuit breaker tracking
         if tool_result.success:
@@ -744,15 +848,18 @@ class PhaseRunner:
             if (count == self._stall.max_consecutive_tool_failures - 1
                     and tool_call.name not in circuit_breaker_warnings):
                 circuit_breaker_warnings.add(tool_call.name)
-                deferred_cb_messages.append(Message(
-                    role=MessageRole.USER,
-                    content=(
-                        f"[TOOL WARNING] Tool '{tool_call.name}' has "
-                        f"failed {count} consecutive times. It will "
-                        f"be temporarily disabled if it fails once "
-                        f"more. Consider an alternative approach or "
-                        f"different parameters."
+                deferred_cb_messages.append((
+                    Message(
+                        role=MessageRole.USER,
+                        content=(
+                            f"[TOOL WARNING] Tool '{tool_call.name}' has "
+                            f"failed {count} consecutive times. It will "
+                            f"be temporarily disabled if it fails once "
+                            f"more. Consider an alternative approach or "
+                            f"different parameters."
+                        ),
                     ),
+                    "tool_warning",
                 ))
             if count == self._stall.max_consecutive_tool_failures:
                 logger.warning(
@@ -760,15 +867,44 @@ class PhaseRunner:
                     f"after {count} consecutive failures in "
                     f"{phase.value} for agent {tool_call.name}"
                 )
-                deferred_cb_messages.append(Message(
-                    role=MessageRole.USER,
-                    content=(
-                        f"[TOOL DISABLED] Tool '{tool_call.name}' has "
-                        f"been temporarily disabled after "
-                        f"{count} consecutive failures. Use alternative "
-                        f"tools or approaches to continue your work."
+                deferred_cb_messages.append((
+                    Message(
+                        role=MessageRole.USER,
+                        content=(
+                            f"[TOOL DISABLED] Tool '{tool_call.name}' has "
+                            f"been temporarily disabled after "
+                            f"{count} consecutive failures. Use alternative "
+                            f"tools or approaches to continue your work."
+                        ),
                     ),
+                    "tool_disabled",
                 ))
+
+    async def _inject_user_message(
+        self,
+        messages: List[Message],
+        content: str,
+        *,
+        kind: str,
+        phase: Phase,
+        iteration: Optional[int],
+        workflow: WorkflowExecution,
+        node: AgentNode,
+    ) -> None:
+        """Append a framework-driven USER message and publish a
+        ``phase_injection`` event so the UI can surface the guidance
+        the agent is about to see on its next turn.
+        """
+        messages.append(Message(role=MessageRole.USER, content=content))
+        await self._event_bus.publish(phase_injection(
+            workflow_id=workflow.workflow_id,
+            task_id=node.task_id,
+            agent_id=node.agent_id,
+            phase=phase.value,
+            kind=kind,
+            content=content,
+            iteration=iteration,
+        ))
 
     async def _handle_tool_call(
         self,
@@ -784,7 +920,7 @@ class PhaseRunner:
         tool_def = self._tool_registry.get(tool_call.name)
         if tool_def and tool_def.is_orchestrator_tool:
             if on_orchestrator_tool:
-                tool_result = await on_orchestrator_tool(tool_call)
+                tool_result = await on_orchestrator_tool(tool_call, self._tool_executor)
             else:
                 tool_result = ToolResult(
                     tool_call_id=tool_call.id,

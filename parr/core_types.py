@@ -13,6 +13,7 @@ Every agent instance uses the same code path — differentiation comes from:
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -33,6 +34,27 @@ def generate_id() -> str:
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _camel_to_snake(name: str) -> str:
+    """Convert camelCase to snake_case."""
+    s1 = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
+    return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s1).lower()
+
+
+def normalise_keys(d: dict) -> dict:
+    """Normalise camelCase dict keys to snake_case.
+
+    LLMs sometimes emit JavaScript-style keys (``taskDescription``) instead
+    of the Python-style keys (``task_description``) that tool schemas expect.
+    Only transforms top-level string keys; nested dicts/values are untouched.
+    """
+    out = {}
+    for k, v in d.items():
+        snake = _camel_to_snake(k) if isinstance(k, str) else k
+        if snake not in out:
+            out[snake] = v
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -228,16 +250,52 @@ class LLMResponse:
 
 @dataclass
 class TokenUsage:
-    """Token consumption from a single LLM call."""
+    """Token consumption from a single LLM call.
+
+    ``input_tokens`` is the **total** number of input tokens charged for
+    the request, regardless of cache state. The cache fields below are
+    sub-totals carved out of ``input_tokens`` for cost-accounting:
+
+    - ``cache_creation_input_tokens`` — input tokens that **wrote** to the
+      provider's prompt cache (Anthropic explicit cache only). These are
+      typically billed at a small premium over the base input price.
+    - ``cache_read_input_tokens`` — input tokens **read from** the cache
+      (Anthropic ``cache_read_input_tokens`` or Azure/OpenAI
+      ``prompt_tokens_details.cached_tokens``). Billed at a steep discount
+      (≈10% of base for Anthropic, ≈50% of base for Azure).
+
+    Adapters that don't surface cache metrics leave both fields at 0,
+    in which case ``CostConfig`` falls back to the pessimistic
+    "all input billed at full price" calculation.
+    """
     input_tokens: int = 0
     output_tokens: int = 0
     total_cost: float = 0.0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
 
+    @property
+    def uncached_input_tokens(self) -> int:
+        """Input tokens that were neither written to nor read from the cache.
+
+        This is what you would have been billed at full input price even
+        with caching enabled. Useful for the live cost display.
+        """
+        cached = self.cache_creation_input_tokens + self.cache_read_input_tokens
+        return max(0, self.input_tokens - cached)
+
     def __repr__(self) -> str:
+        if self.cache_read_input_tokens or self.cache_creation_input_tokens:
+            return (
+                f"TokenUsage(in={self.input_tokens} "
+                f"[cache_read={self.cache_read_input_tokens}, "
+                f"cache_write={self.cache_creation_input_tokens}], "
+                f"out={self.output_tokens}, cost=${self.total_cost:.4f})"
+            )
         return (
             f"TokenUsage(in={self.input_tokens}, out={self.output_tokens}, "
             f"cost=${self.total_cost:.4f})"
@@ -405,6 +463,26 @@ class ToolDef:
     max_retries: int = 0                             # Retry attempts (only if retry_on_failure)
     wraps_untrusted_content: bool = False            # Results contain user-uploaded content
     cacheable: bool = False                          # Opt-in: cache results for identical args (off by default)
+    # Stall-detector hints. Read-only tools (e.g., get_*) don't reset the
+    # framework-only call counter; progress-marking tools (e.g., log_finding,
+    # mark_todo_complete) do. See stall_detector.py for the full classification.
+    is_read_only: bool = False
+    marks_progress: bool = False
+    # Per-tool stripping: after a successful call, heavy input fields are
+    # replaced with "<stripped after dispatch>" in the assistant message's
+    # tool_call.arguments. This saves tokens on subsequent iterations when
+    # the conversation history is re-sent. Per-call override via an
+    # auto-injected ``strip_input_after_dispatch`` argument.
+    strip_input_after_dispatch: bool = False
+    heavy_input_fields: List[str] = field(default_factory=list)
+    # Per-tool middleware (logging, caching, redaction, etc.). Combined with
+    # any executor-level middleware at call time. See ToolMiddleware in this
+    # module and tool_executor._execute_with_middleware.
+    middleware: Optional[List["ToolMiddleware"]] = None
+    # When True, the phase ends immediately after a successful call to this
+    # tool — no further LLM round-trips. Used by submit_report to avoid the
+    # wasted "what next?" iteration after report submission.
+    terminates_phase: bool = False
 
     def to_llm_schema(self) -> Dict[str, Any]:
         """Convert to the schema format sent to the LLM."""
@@ -424,6 +502,20 @@ class ToolDef:
     def __repr__(self) -> str:
         phases = ",".join(p.value for p in self.phase_availability)
         return f"ToolDef(name={self.name!r}, phases=[{phases}])"
+
+
+def strip_heavy_fields_in_place(
+    args: Dict[str, Any], heavy_fields: List[str],
+) -> None:
+    """Replace heavy input fields with compact stubs in-place.
+
+    Mutates ``args`` so that the parent agent's conversation history
+    (which still references this dict) drops bulky payloads on subsequent
+    iterations, saving input tokens.
+    """
+    for key in heavy_fields:
+        if key in args and args[key]:
+            args[key] = "<stripped after dispatch>"
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +538,28 @@ class BudgetConfig:
     context_soft_compaction_pct: float = 0.78  # Fraction of context for soft compaction (~100K of 128K)
     context_hard_truncation_pct: float = 0.65  # Fraction of context for hard truncation
     chars_per_token: float = 4.0  # Tuneable token estimation ratio (chars / token)
+    # Cap on items rendered per memory collection in the working memory
+    # snapshot. None = unlimited (legacy behavior). When set, only the
+    # most recent N items per collection appear in the snapshot; agents
+    # use list_collection / get_collection for the rest.
+    snapshot_max_items_per_collection: Optional[int] = None
+    # ResultCacheMiddleware: dedup successful read-only tool results to
+    # cut cost when an agent re-issues identical reads in a phase.
+    # When None, the middleware is not installed (legacy behavior).
+    # When set to a non-None value, AgentRuntime installs the cache.
+    result_cache_enabled: Optional[bool] = None
+    result_cache_scope: str = "phase"  # "phase" or "agent"
+    result_cache_max_entries: Optional[int] = 256
+    # Summarize-on-read: when get_collection is called without an
+    # explicit summarize flag, the framework auto-summarizes if total
+    # collection content >= this threshold (chars). 0 disables auto —
+    # the agent must pass summarize=True explicitly. Requires a
+    # summarizer to be wired through the orchestrator/runtime.
+    summarize_on_read_threshold_chars: int = 0
+    # Optional default summary directive handed to the summarizer when
+    # the tool call does not provide one. Useful for steering the global
+    # shape of summaries (e.g. preserve quantified findings & sources).
+    default_summary_instructions: Optional[str] = None
 
 
 @dataclass
@@ -459,6 +573,26 @@ class BudgetUsage:
     def elapsed_ms(self) -> float:
         delta = utc_now() - self.started_at
         return delta.total_seconds() * 1000
+
+
+# ---------------------------------------------------------------------------
+# Policies
+# ---------------------------------------------------------------------------
+
+class SpawnPolicy(str, Enum):
+    """How the framework handles same-role spawn attempts."""
+    DENY = "deny"        # Hard block — return error
+    WARN = "warn"        # Inject warning into result, proceed
+    CONSULT = "consult"  # Run consultant agent, obey decision
+
+
+@dataclass(frozen=True)
+class PoliciesConfig:
+    """Runtime behaviour policies (loaded from policies.yaml)."""
+    same_role_spawn_policy: SpawnPolicy = SpawnPolicy.WARN
+    consultant_model: Optional[str] = None   # Model for consult mode (from models.yaml)
+    consultant_max_tokens: int = 512
+    consultant_temperature: float = 0.1
 
 
 # ---------------------------------------------------------------------------
@@ -626,10 +760,19 @@ class AdaptiveFlowConfig:
 
 @dataclass(frozen=True)
 class ModelConfig:
-    """LLM model parameters."""
+    """LLM model parameters.
+
+    ``prompt_caching`` is an optional per-role override for explicit
+    cache markers (e.g. Anthropic ``cache_control``). When None, the LLM
+    adapter falls back to its constructor default (set globally via the
+    factory). Set ``True`` to force-enable or ``False`` to force-disable
+    caching for a specific role / sub-role — useful when one agent's
+    prompt changes too often to benefit from caching.
+    """
     temperature: float = 0.7
     top_p: float = 1.0
     max_tokens: int = 4096
+    prompt_caching: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -666,6 +809,11 @@ class AgentInput:
     parent_errors: Optional[List[ErrorEntry]] = None
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     effort_level: Optional[int] = None
+    # Per-role override for direct-answer JSON-schema enforcement.
+    # "enforce" → require structured output even on direct-answer path;
+    # "bypass"  → allow free-form text on direct-answer path;
+    # None      → fall back to the global SimpleQueryBypassConfig gate.
+    direct_answer_schema_policy: Optional[str] = None
 
     def __repr__(self) -> str:
         task_preview = self.task[:50]
@@ -795,6 +943,7 @@ class AgentNode:
     budget_consumed: BudgetUsage = field(default_factory=BudgetUsage)
     depth: int = 0
     review_attempts: int = 0
+    description: str = ""  # One-line summary provided by parent at spawn time
 
 
 @dataclass
@@ -842,10 +991,21 @@ class WorkflowExecution:
 
 @dataclass(frozen=True)
 class ModelPricing:
-    """Pricing for a single model."""
+    """Pricing for a single model.
+
+    ``cached_input_price_per_1k`` is optional and only used when the LLM
+    adapter populates ``TokenUsage.cache_read_input_tokens``. If left at
+    None, the framework falls back to charging cache-read tokens at the
+    full ``input_price_per_1k`` (the safe, pessimistic default — never
+    underestimates cost). Anthropic's explicit cache also writes a cache
+    entry on the first hit; that write is billed via
+    ``cache_write_price_per_1k`` if set, otherwise the full input price.
+    """
     input_price_per_1k: float = 0.0
     output_price_per_1k: float = 0.0
     context_window: int = 128000
+    cached_input_price_per_1k: Optional[float] = None
+    cache_write_price_per_1k: Optional[float] = None
 
 
 @dataclass
@@ -855,6 +1015,17 @@ class CostConfig:
 
     def calculate_cost(self, model: str, usage: TokenUsage, strict: bool = False) -> float:
         """Calculate the cost for a given model and token usage.
+
+        Cache-aware: when ``usage.cache_read_input_tokens`` or
+        ``usage.cache_creation_input_tokens`` are non-zero, those slices
+        of the input total are charged at the cached / write price if
+        the model has them configured. Tokens not accounted for by either
+        cache field are charged at the regular ``input_price_per_1k``.
+
+        Adapters that don't surface cache metrics leave both cache fields
+        at 0, in which case this reduces to the original
+        ``input_tokens * input_price_per_1k`` calculation — i.e. fully
+        backwards-compatible.
 
         Args:
             model: Model name to look up pricing for.
@@ -879,6 +1050,43 @@ class CostConfig:
                     model,
                 )
             return 0.0
-        input_cost = (usage.input_tokens / 1000) * pricing.input_price_per_1k
+
+        # Slice the input total into cached/write/uncached buckets.
+        cache_read = max(0, usage.cache_read_input_tokens)
+        cache_write = max(0, usage.cache_creation_input_tokens)
+        # Cap the buckets so they can never exceed the total (defensive
+        # against an adapter that double-counts).
+        if cache_read + cache_write > usage.input_tokens:
+            overflow = (cache_read + cache_write) - usage.input_tokens
+            # Trim the smaller bucket first so cache_read (the larger
+            # discount typically) stays accurate.
+            if cache_write >= overflow:
+                cache_write -= overflow
+            else:
+                overflow -= cache_write
+                cache_write = 0
+                cache_read = max(0, cache_read - overflow)
+        uncached_in = max(0, usage.input_tokens - cache_read - cache_write)
+
+        # Cached read: use the cached price if present, else fall back
+        # to the full input price (pessimistic — never underestimate).
+        cached_price = (
+            pricing.cached_input_price_per_1k
+            if pricing.cached_input_price_per_1k is not None
+            else pricing.input_price_per_1k
+        )
+        # Cache write: use the explicit write price if present, else
+        # fall back to the full input price.
+        write_price = (
+            pricing.cache_write_price_per_1k
+            if pricing.cache_write_price_per_1k is not None
+            else pricing.input_price_per_1k
+        )
+
+        input_cost = (
+            (uncached_in / 1000) * pricing.input_price_per_1k
+            + (cache_read / 1000) * cached_price
+            + (cache_write / 1000) * write_price
+        )
         output_cost = (usage.output_tokens / 1000) * pricing.output_price_per_1k
         return input_cost + output_cost

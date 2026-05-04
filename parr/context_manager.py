@@ -137,9 +137,11 @@ PHASE_PROMPTS: Dict[Phase, str] = {
 Your task is to create a plan for this assignment. DO NOT answer the question
 or produce a final deliverable in this phase.
 
-You have access to tools — they are listed in your function schema. Call
-them to retrieve data. Do not assume you cannot use them. Do not ask the
-user for information that a tool can provide.
+You have access to tools — they are listed in your function schema.
+You may call them to retrieve additional data, but check the Available
+Data block first — if a field you need is already present, do not
+refetch it via tools, as that wastes tokens. Do not ask the user for
+information that a tool can provide.
 
 1. Read the task carefully.
 2. If a parent plan exists, align your work with your assigned scope.
@@ -183,9 +185,11 @@ CRITICAL RULE: Every meaningful result MUST be recorded using log_finding
 or batch_log_findings. This is mandatory — even for answers from model
 knowledge that don't require external tools.
 
-You have access to tools — they are listed in your function schema. Call
-them to retrieve data. Do not assume you cannot use them. Do not ask the
-user for information that a tool can provide.
+You have access to tools — they are listed in your function schema.
+You may call them to retrieve additional data, but check the Available
+Data block first — if a field you need is already present, do not
+refetch it via tools, as that wastes tokens. Do not ask the user for
+information that a tool can provide.
 
 Execution policy:
 - If a todo list exists, work through items in order. After completing each
@@ -294,8 +298,12 @@ Produce the final deliverable by synthesizing ALL validated findings into
 a comprehensive, well-structured response.
 
 Instructions:
-1. Retrieve findings with get_findings (and get_agent_results_all if
-   sub-agents were used).
+1. Your findings from previous phases are ALREADY loaded in the
+   "Current Working State" section above — read them directly from there
+   instead of calling get_findings. Only call get_findings if you need a
+   category-filtered subset (e.g. get_findings(category="risk")).
+   Only call get_agent_results_all if sub-agents were used and you need
+   their full per-agent outputs beyond what your findings already capture.
 2. Write a DETAILED, COMPREHENSIVE response that incorporates ALL findings
    in depth. Do NOT compress rich findings into thin one-line summaries.
    Include details, examples, techniques, tools, and specifics from every
@@ -386,6 +394,13 @@ class ContextManager:
             )
         # Expose max_context_tokens for external use (e.g., budget decisions)
         self._max_context_tokens = self._strategy.max_context_tokens
+        # Cache compaction thresholds locally so compact_if_needed /
+        # truncate_if_needed can apply soft/hard limits without reaching
+        # into the strategy. Pulled from the strategy so a custom
+        # CompactionStrategy still drives the behavior.
+        self._soft_compaction_pct = self._strategy.soft_compaction_pct
+        self._hard_truncation_pct = self._strategy.hard_truncation_pct
+        self._chars_per_token = self._strategy.chars_per_token
         # Custom phase prompts (None = use PHASE_PROMPTS defaults)
         self._phase_prompts = phase_prompts
         # Phase sequence for cross-phase context (None = use legacy hard-coded logic)
@@ -543,106 +558,15 @@ class ContextManager:
         messages: List[Message],
         soft_fraction: Optional[float] = None,
     ) -> List[Message]:
+        """Soft compaction. Delegates to the compaction strategy.
+
+        Custom strategies may override ``compact_if_needed`` to plug in
+        LLM-based summarisation, RAG retrieval, or any other behaviour.
         """
-        Soft compaction at configurable context usage threshold.
-
-        Smarter than hard truncation: summarizes completed todo/tool results
-        but preserves important content like findings and raw data.
-
-        Operates on *message groups* to avoid breaking the assistant→tool-result
-        pairing required by chat APIs.  A group is either:
-        - an assistant message with tool_calls followed by its N tool-result messages, or
-        - a standalone message (user, system, or assistant without tool_calls).
-
-        Preserves:
-        - System prompt (first message)
-        - Original user message with task + raw data (second message)
-        - Groups containing findings (log_finding results)
-        - Last 3 groups (recent work)
-
-        Summarizes and drops:
-        - Completed todo tool calls/results
-        - Old groups beyond the last 3
-
-        Args:
-            messages: Current message history.
-            soft_fraction: Fraction of max_context_tokens as soft threshold.
-                Defaults to the instance-level soft_compaction_pct.
-
-        Returns:
-            Possibly compacted message list.
-        """
-        if soft_fraction is None:
-            soft_fraction = self._soft_compaction_pct
-        token_limit = int(self._max_context_tokens * soft_fraction)
-        current_tokens = self.estimate_tokens(messages)
-
-        if current_tokens <= token_limit:
-            return messages
-
-        # Not enough messages to compact meaningfully — but still over limit.
-        if len(messages) <= 6:
-            logger.warning(
-                f"Context ({current_tokens} tokens) exceeds soft limit "
-                f"({token_limit}) but has too few messages ({len(messages)}) "
-                f"to compact. Consider reducing system prompt or input size."
-            )
-            return messages
-
-        logger.info(
-            f"Soft compaction triggered: {current_tokens} tokens "
-            f"exceeds soft limit of {token_limit}"
-        )
-
-        preserved_start = messages[:2]  # system + user
-
-        # Group remaining messages into assistant+tool pairs
-        groups = self._pair_messages(messages[2:])
-
-        if len(groups) <= 3:
-            return messages  # Not enough groups to compact
-
-        # Keep last 3 groups as recent context
-        middle_groups = groups[:-3]
-        recent_groups = groups[-3:]
-
-        # Identify groups containing findings vs droppable
-        findings_groups: List[List[Message]] = []
-        droppable_messages: List[Message] = []
-        for group in middle_groups:
-            if any(self._contains_findings(msg) for msg in group):
-                findings_groups.append(group)
-            else:
-                droppable_messages.extend(group)
-
-        # Build summary of dropped work
-        dropped_summary = self._summarize_dropped(droppable_messages)
-
-        result = list(preserved_start)
-        if dropped_summary:
-            result.append(Message(
-                role=MessageRole.USER,
-                content=(
-                    "[CONTEXT COMPACTED] Some earlier messages were summarised "
-                    "to free context space. Your findings and recent work are "
-                    "preserved. If you need details that appear missing, check "
-                    "your working memory (get_findings / get_todo_list).\n\n"
-                    f"{dropped_summary}"
-                ),
-            ))
-        for group in findings_groups:
-            result.extend(group)
-        for group in recent_groups:
-            result.extend(group)
-
-        new_tokens = self.estimate_tokens(result)
-        logger.info(f"Soft compaction: {current_tokens} → {new_tokens} tokens")
-        self.last_compaction_info = {
-            "type": "soft",
-            "before_tokens": current_tokens,
-            "after_tokens": new_tokens,
-            "dropped_groups": len(droppable_messages),
-        }
+        result = self._strategy.compact_if_needed(messages, soft_fraction)
+        info = getattr(self._strategy, "last_compaction_info", None)
+        if info is not None:
+            self.last_compaction_info = info
         return result
 
     def truncate_if_needed(
@@ -651,87 +575,10 @@ class ContextManager:
         max_fraction: Optional[float] = None,
     ) -> List[Message]:
         """Hard truncation. Delegates to the compaction strategy."""
-        return self._strategy.truncate_if_needed(messages, max_fraction)
-        
-        """
-        First attempts soft compaction. If still over the hard limit,
-        aggressively truncates to system + user + last 3 message groups.
-
-        Operates on *message groups* to avoid breaking the assistant→tool-result
-        pairing required by chat APIs.
-
-        Preserves:
-        - System prompt (first message)
-        - Original user message (second message)
-        - Last 3 message groups (recent context)
-
-        Args:
-            messages: Current message history.
-            max_fraction: Fraction of max_context_tokens as hard threshold.
-                Defaults to the instance-level hard_truncation_pct.
-
-        Returns:
-            Possibly truncated message list.
-        """
-        # First try soft compaction
-        messages = self.compact_if_needed(messages)
-
-        if max_fraction is None:
-            max_fraction = self._hard_truncation_pct
-        token_limit = int(self._max_context_tokens * max_fraction)
-        current_tokens = self.estimate_tokens(messages)
-
-        if current_tokens <= token_limit:
-            return messages
-
-        logger.info(
-            f"Hard truncation triggered: {current_tokens} tokens "
-            f"exceeds limit of {token_limit}"
-        )
-
-        # Group messages after the preserved start
-        groups = self._pair_messages(messages[2:])
-
-        if len(groups) <= 3:
-            logger.warning(
-                f"Context ({current_tokens} tokens) exceeds hard limit "
-                f"({token_limit}) but has too few message groups "
-                f"({len(groups)}) to truncate further."
-            )
-            return messages  # Not enough to truncate
-
-        preserved_start = messages[:2]  # system + user
-        recent_groups = groups[-3:]  # last 3 groups
-
-        # Build a summary of what was dropped
-        dropped_messages: List[Message] = []
-        for group in groups[:-3]:
-            dropped_messages.extend(group)
-        dropped_summary = self._summarize_dropped(dropped_messages)
-
-        result = list(preserved_start)
-        if dropped_summary:
-            result.append(Message(
-                role=MessageRole.USER,
-                content=(
-                    "[CONTEXT TRUNCATED] Earlier messages were aggressively "
-                    "trimmed to stay within the context limit. Only your most "
-                    "recent work is visible. Rely on your working memory "
-                    "(get_findings / get_todo_list) for prior results.\n\n"
-                    f"{dropped_summary}"
-                ),
-            ))
-        for group in recent_groups:
-            result.extend(group)
-
-        new_tokens = self.estimate_tokens(result)
-        logger.info(f"Hard truncation: {current_tokens} → {new_tokens} tokens")
-        self.last_compaction_info = {
-            "type": "hard",
-            "before_tokens": current_tokens,
-            "after_tokens": new_tokens,
-            "dropped_groups": len(dropped_messages),
-        }
+        result = self._strategy.truncate_if_needed(messages, max_fraction)
+        info = getattr(self._strategy, "last_compaction_info", None)
+        if info is not None:
+            self.last_compaction_info = info
         return result
 
     def _build_system_prompt(
@@ -780,25 +627,67 @@ class ContextManager:
                     f"tools before completing: {', '.join(mandatory)}"
                 )
 
-        # Effort level awareness (first phase only — Plan or Act)
-        if input.effort_level is not None and phase in (Phase.PLAN, Phase.ACT):
+        # Phase-awareness: tell the agent what phase it's in, what the
+        # pipeline looks like, and what's expected in this phase.
+        if input.effort_level is not None:
             effort_phases, _, _ = get_effort_spec(input.effort_level)
             phase_names = " → ".join(p.value.capitalize() for p in effort_phases)
-            effort_name = EffortLevel(input.effort_level).name.capitalize()
-            effort_msg = (
-                f"Effort level: {input.effort_level} ({effort_name}). "
-                f"Pipeline: {phase_names}. "
-                f"Sub-agents inherit this level by default and cannot exceed it. "
-                f"You may set a lower effort_level per sub-agent if the task is "
-                f"simple, but never higher than {input.effort_level}."
-            )
-            if input.effort_level <= 1:
-                effort_msg += (
-                    " At this effort level, be maximally efficient: "
-                    "use batch_operations for ALL memory work in a single call, "
-                    "minimise iterations, avoid unnecessary tool calls."
+
+            if input.effort_level == 0:
+                phase_msg = (
+                    f"Pipeline: {phase_names} (single-phase mode). "
+                    "You MUST use tools to deliver your work. "
+                    "Step 1: Use batch_log_findings or log_finding to record "
+                    "all your analysis findings. "
+                    "Step 2: Call submit_report with the structured output "
+                    "schema to deliver your final output. "
+                    "Do NOT just respond with text — text-only responses "
+                    "produce unstructured output that cannot be properly "
+                    "processed. Always end with submit_report."
                 )
-            parts.append(effort_msg)
+            elif phase == Phase.PLAN:
+                phase_msg = (
+                    f"Pipeline: {phase_names}. "
+                    "You are in the PLAN phase. Create a plan for your work. "
+                    "Execution happens in the ACT phase."
+                )
+            elif phase == Phase.ACT:
+                phase_msg = (
+                    f"Pipeline: {phase_names}. "
+                    "You are in the ACT phase. Collect information, analyze "
+                    "data, and log findings. Do NOT submit a report in this "
+                    "phase — that happens in the REPORT phase."
+                )
+            elif phase == Phase.REVIEW:
+                phase_msg = (
+                    f"Pipeline: {phase_names}. "
+                    "You are in the REVIEW phase. Evaluate the work done "
+                    "in the ACT phase."
+                )
+            elif phase == Phase.REPORT:
+                phase_msg = (
+                    f"Pipeline: {phase_names}. "
+                    "You are in the REPORT phase. Synthesize your findings "
+                    "into a final report using submit_report."
+                )
+            else:
+                phase_msg = f"Pipeline: {phase_names}."
+
+            # Sub-agent effort inheritance note (only in spawning phases)
+            if phase in (Phase.PLAN, Phase.ACT):
+                phase_msg += (
+                    f" Sub-agents inherit effort level {input.effort_level} "
+                    f"by default and cannot exceed it."
+                )
+
+            if input.effort_level <= 1:
+                phase_msg += (
+                    " Be maximally efficient: use batch_operations for ALL "
+                    "memory work in a single call, minimise iterations, "
+                    "avoid unnecessary tool calls."
+                )
+
+            parts.append(phase_msg)
 
         # Untrusted content warning
         parts.append(

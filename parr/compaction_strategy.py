@@ -74,6 +74,22 @@ class CompactionStrategy:
     def max_context_tokens(self) -> int:
         return self._max_context_tokens
 
+    @property
+    def soft_compaction_pct(self) -> float:
+        return self._soft_compaction_pct
+
+    @property
+    def hard_truncation_pct(self) -> float:
+        return self._hard_truncation_pct
+
+    @property
+    def chars_per_token(self) -> float:
+        return self._chars_per_token
+
+    @property
+    def tool_schema_overhead(self) -> int:
+        return self._tool_schema_overhead
+
     # -------------------------------------------------------------------
     # Token estimation — override for real tokenizer (e.g., tiktoken)
     # -------------------------------------------------------------------

@@ -49,12 +49,14 @@ from .core_types import (
     Phase,
     PhaseConfig,
     PlanContext,
+    PoliciesConfig,
     PlanContextStatus,
     PlanContextType,
     PlanStep,
     PlanStepStatus,
     ReviewMode,
     SimpleQueryBypassConfig,
+    SpawnPolicy,
     StallDetectionConfig,
     TokenUsage,
     ToolCall,
@@ -67,6 +69,7 @@ from .core_types import (
     WorkflowStatus,
     generate_id,
     get_effort_spec,
+    normalise_keys,
     utc_now,
 )
 
@@ -75,6 +78,7 @@ from .protocols import (
     DomainAdapter,
     DocumentSearchProvider,
     EventSink,
+    TextSummarizer,
     ToolCallingLLM,
 )
 
@@ -107,6 +111,7 @@ from .persistence import AgentFileStore, WorkflowFileStore
 # Tool system
 from .tool_registry import ToolRegistry
 from .tool_executor import ToolExecutor
+from .result_cache_middleware import ResultCacheMiddleware, ResultCacheStats
 
 # Framework tools (for testing / custom setups)
 from .framework_tools import AgentWorkingMemory, MemoryCollection
@@ -184,12 +189,14 @@ __all__ = [
     "Phase",
     "PhaseConfig",
     "PlanContext",
+    "PoliciesConfig",
     "PlanContextStatus",
     "PlanContextType",
     "PlanStep",
     "PlanStepStatus",
     "ReviewMode",
     "SimpleQueryBypassConfig",
+    "SpawnPolicy",
     "StallDetectionConfig",
     "TokenUsage",
     "ToolCall",
@@ -203,11 +210,13 @@ __all__ = [
     # Helpers
     "generate_id",
     "get_effort_spec",
+    "normalise_keys",
     "utc_now",
     # Protocols
     "DomainAdapter",
     "DocumentSearchProvider",
     "EventSink",
+    "TextSummarizer",
     "ToolCallingLLM",
     # Runtime
     "AgentRuntime",
@@ -234,6 +243,8 @@ __all__ = [
     # Tools
     "ToolRegistry",
     "ToolExecutor",
+    "ResultCacheMiddleware",
+    "ResultCacheStats",
     "AgentWorkingMemory",
     "MemoryCollection",
     # Context

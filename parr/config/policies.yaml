@@ -1,0 +1,13 @@
+policies:
+  # What happens when an agent tries to spawn a child with the same (role, sub_role).
+  # deny:    Hard block — tool returns error.
+  # warn:    Inject warning into spawn result. Agent proceeds.
+  # consult: Run a consultant agent (level 0) to validate. Obey decision.
+  same_role_spawn_policy: warn
+
+  # Model for the consultant agent (consult mode only).
+  # Must reference a model name defined in models.yaml.
+  # If null, the framework uses the parent agent's model as fallback.
+  consultant_model: null
+  consultant_max_tokens: 512
+  consultant_temperature: 0.1

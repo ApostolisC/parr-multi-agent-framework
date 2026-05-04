@@ -17,6 +17,7 @@ It is code-level (not an LLM). It handles:
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 from typing import Any, Callable, Dict, List, Optional
@@ -55,6 +56,7 @@ from .core_types import (
     ErrorEntry,
     ErrorSource,
     ExecutionMetadata,
+    ModelConfig,
     Phase,
     PhaseConfig,
     SimpleQueryBypassConfig,
@@ -64,12 +66,22 @@ from .core_types import (
     ToolResult,
     TokenUsage,
     TraceEntry,
+    PoliciesConfig,
+    SpawnPolicy,
     WorkflowExecution,
     WorkflowStatus,
     generate_id,
+    normalise_keys as _normalise_keys,
+    strip_heavy_fields_in_place,
     utc_now,
 )
-from .protocols import DomainAdapter, EventSink, ToolCallingLLM
+from .event_types import (
+    batch_progress as batch_progress_event,
+    batch_started as batch_started_event,
+    spawn_started as spawn_started_event,
+    spawn_validation as spawn_validation_event,
+)
+from .protocols import DomainAdapter, EventSink, TextSummarizer, ToolCallingLLM
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +143,8 @@ class Orchestrator:
         output_validator: Optional[OutputValidator] = None,
         coordinator: Optional[AgentCoordinator] = None,
         adaptive_config: Optional[AdaptiveFlowConfig] = None,
+        summarizer: Optional[TextSummarizer] = None,
+        policies_config: Optional[PoliciesConfig] = None,
     ) -> None:
         self._llm = llm
         self._domain_adapter = domain_adapter
@@ -147,6 +161,8 @@ class Orchestrator:
         self._wait_for_agents_timeout = wait_for_agents_timeout
         self._persist_dir = persist_dir
         self._adaptive_config = adaptive_config
+        self._summarizer = summarizer
+        self._policies_config = policies_config or PoliciesConfig()
 
         # Internal event bus
         self._event_bus = EventBus()
@@ -336,6 +352,20 @@ class Orchestrator:
                 except Exception as e:
                     logger.warning("Failed to get initial context from adapter: %s", e)
 
+            # Resolve direct-answer schema policy for the root agent
+            root_da_policy = None
+            if self._domain_adapter and hasattr(
+                self._domain_adapter, 'get_direct_answer_schema_policy',
+            ):
+                try:
+                    root_da_policy = self._domain_adapter.get_direct_answer_schema_policy(
+                        role, sub_role,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to resolve direct_answer_schema_policy: %s", e,
+                    )
+
             # Build agent input
             agent_input = AgentInput(
                 task=task,
@@ -347,6 +377,7 @@ class Orchestrator:
                 budget=workflow_budget,
                 trace_snapshot=trace_store.get_snapshot(root_node.task_id),
                 effort_level=effort_level,
+                direct_answer_schema_policy=root_da_policy,
             )
 
             # Build report template handler from adapter
@@ -367,6 +398,10 @@ class Orchestrator:
                 budget_config=workflow_budget,
                 agent_file_store=root_store,
                 effort_level=effort_level,
+                output_validator=self._output_validator,
+                adaptive_config=self._adaptive_config,
+                phase_config=self._phase_config,
+                summarizer=self._summarizer,
             )
 
             # Execute with orchestrator tool handling
@@ -375,9 +410,9 @@ class Orchestrator:
                 input=agent_input,
                 node=root_node,
                 workflow=workflow,
-                on_orchestrator_tool=lambda tc: self._handle_orchestrator_tool(
+                on_orchestrator_tool=lambda tc, te: self._handle_orchestrator_tool(
                     tc, root_node, workflow, trace_store, roles_desc,
-                    wf_store,
+                    wf_store, tool_executor=te,
                 ),
             )
 
@@ -497,15 +532,23 @@ class Orchestrator:
         trace_store: TraceStore,
         roles_description: str,
         wf_store: Optional[WorkflowFileStore] = None,
+        *,
+        tool_executor: Optional[Any] = None,
     ) -> ToolResult:
         """
         Handle orchestrator-level tool calls (spawn_agent, wait_for_agents, etc.).
+
+        ``tool_executor`` is the per-agent ToolExecutor, plumbed through
+        from the PhaseRunner callback so that ``batch_operations`` can
+        dispatch arbitrary registered tools (not just orchestrator tools).
         """
         handlers = {
+            "batch_operations": self._handle_batch_operations,
             "spawn_agent": self._handle_spawn_agent,
             "wait_for_agents": self._handle_wait_for_agents,
             "get_agent_result": self._handle_get_agent_result,
             "get_agent_results_all": self._handle_get_agent_results_all,
+            "get_agent_phase_output": self._handle_get_agent_phase_output,
             "send_message": self._handle_send_message,
             "read_messages": self._handle_read_messages,
             "set_shared_state": self._handle_set_shared_state,
@@ -522,10 +565,28 @@ class Orchestrator:
             )
 
         try:
-            return await handler(
+            result = await handler(
                 tool_call, parent_node, workflow, trace_store, roles_description,
-                wf_store,
+                wf_store, tool_executor=tool_executor,
             )
+
+            # --- Per-tool stripping for orchestrator tools ---
+            if result.success:
+                from .tool_registry import ToolRegistry
+                registry = tool_executor._registry if tool_executor else None
+                if registry:
+                    td = registry.get(tool_call.name)
+                    if td:
+                        effective_strip = tool_call.arguments.get(
+                            "strip_input_after_dispatch",
+                            td.strip_input_after_dispatch,
+                        )
+                        if effective_strip and td.heavy_input_fields:
+                            strip_heavy_fields_in_place(
+                                tool_call.arguments, td.heavy_input_fields,
+                            )
+            return result
+
         except BudgetExceededException as e:
             return ToolResult(
                 tool_call_id=tool_call.id,
@@ -545,6 +606,266 @@ class Orchestrator:
                 error=f"Orchestrator tool {tool_call.name} failed: {e}",
             )
 
+    # -----------------------------------------------------------------------
+    # batch_operations — generic tool dispatcher
+    # -----------------------------------------------------------------------
+
+    async def _handle_batch_operations(
+        self,
+        tool_call: ToolCall,
+        parent_node: AgentNode,
+        workflow: WorkflowExecution,
+        trace_store: TraceStore,
+        roles_description: str,
+        wf_store: Optional[WorkflowFileStore] = None,
+        *,
+        tool_executor: Optional[Any] = None,
+    ) -> ToolResult:
+        """Handle batch_operations — a generic tool dispatcher.
+
+        Dispatches each ``op`` in the ``operations`` array to the
+        appropriate handler: orchestrator tools route through this
+        class's handler table, regular tools route through the
+        ToolExecutor.
+
+        When any ``spawn_agent`` ops succeed, the method automatically
+        calls ``wait_for_agents`` on the collected task_ids before
+        returning, replacing each spawn op result with the full
+        sub-agent report. This collapses the spawn→wait→synthesize
+        pattern from 3 turns to 2.
+        """
+        operations = tool_call.arguments.get("operations", [])
+        if not isinstance(operations, list) or not operations:
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                success=False,
+                content="",
+                error="batch_operations requires a non-empty 'operations' array.",
+            )
+
+        parallel = bool(tool_call.arguments.get("parallel", False))
+
+        # Emit batch_started so the UI can show the card immediately
+        await self._event_bus.publish(batch_started_event(
+            workflow_id=workflow.workflow_id,
+            task_id=parent_node.task_id,
+            agent_id=parent_node.agent_id,
+            batch_tool_call_id=tool_call.id,
+            operations=operations,
+        ))
+        registry = tool_executor._registry if tool_executor else None
+
+        # -- per-op dispatch closure --
+        async def _dispatch_op(
+            i: int, op: Dict[str, Any],
+        ) -> Dict[str, Any]:
+            op_type = str(op.get("op", "")).strip()
+            if not op_type:
+                return {
+                    "op_index": i, "tool": "", "success": False,
+                    "error": "Missing 'op' field.",
+                }
+
+            # Guard: nested batch_operations
+            if op_type == "batch_operations":
+                return {
+                    "op_index": i, "tool": op_type, "success": False,
+                    "error": "Nested batch_operations are not supported.",
+                }
+
+            # Guard: explicit wait_for_agents
+            if op_type == "wait_for_agents":
+                return {
+                    "op_index": i, "tool": op_type, "success": False,
+                    "error": (
+                        "wait_for_agents cannot be batched explicitly; "
+                        "batch_operations auto-waits for any spawn_agent "
+                        "ops it dispatches."
+                    ),
+                }
+
+            # Look up the tool
+            tool_def = registry.get(op_type) if registry else None
+            if tool_def is None:
+                return {
+                    "op_index": i, "tool": op_type, "success": False,
+                    "error": f"Unknown tool '{op_type}'. Check the tool name and try again.",
+                }
+
+            # Phase availability check for inner ops
+            if tool_def.phase_availability and parent_node.current_phase:
+                if parent_node.current_phase not in tool_def.phase_availability:
+                    avail = ", ".join(
+                        p.name for p in tool_def.phase_availability
+                    )
+                    return {
+                        "op_index": i, "tool": op_type, "success": False,
+                        "error": (
+                            f"Tool '{op_type}' is not available in the "
+                            f"{parent_node.current_phase.name} phase. "
+                            f"Available in: {avail}."
+                        ),
+                    }
+
+            # Build synthetic ToolCall (exclude meta-keys from arguments)
+            _META_KEYS = {"op", "strip_input_after_dispatch"}
+            synth_args = {k: v for k, v in op.items() if k not in _META_KEYS}
+
+            # Normalise common camelCase→snake_case from LLMs that emit
+            # JavaScript-style keys (e.g. taskDescription → task_description).
+            synth_args = _normalise_keys(synth_args)
+
+            synth = ToolCall(
+                id=f"{tool_call.id}::{i}",
+                name=op_type,
+                arguments=synth_args,
+            )
+
+            try:
+                if tool_def.is_orchestrator_tool:
+                    # Route through orchestrator handler table (spawn_agent, etc.)
+                    result = await self._handle_orchestrator_tool(
+                        synth, parent_node, workflow, trace_store,
+                        roles_description, wf_store,
+                        tool_executor=tool_executor,
+                    )
+                else:
+                    # Route through ToolExecutor (memory ops, domain tools, etc.)
+                    if tool_executor is None:
+                        return {
+                            "op_index": i, "tool": op_type, "success": False,
+                            "error": (
+                                f"Cannot dispatch '{op_type}': no tool executor "
+                                f"available in this context."
+                            ),
+                        }
+                    result = await tool_executor.execute(synth)
+            except Exception as exc:
+                logger.error(
+                    f"batch_operations op[{i}] {op_type} raised: {exc}",
+                    exc_info=True,
+                )
+                return {
+                    "op_index": i, "tool": op_type, "success": False,
+                    "error": str(exc),
+                }
+
+            # Parse result content for structured data
+            result_payload: Any = result.content
+            if isinstance(result_payload, str):
+                try:
+                    result_payload = json.loads(result_payload)
+                except (json.JSONDecodeError, TypeError):
+                    pass  # keep as string
+
+            op_result: Dict[str, Any] = {
+                "op_index": i,
+                "tool": op_type,
+                "success": result.success,
+            }
+            if result.success:
+                op_result["result"] = result_payload
+            else:
+                op_result["error"] = result.error or "Unknown error"
+
+            # -- per-op stripping --
+            effective_strip = op.get(
+                "strip_input_after_dispatch",
+                tool_def.strip_input_after_dispatch,
+            )
+            if effective_strip and result.success and tool_def.heavy_input_fields:
+                strip_heavy_fields_in_place(op, tool_def.heavy_input_fields)
+
+            return op_result
+
+        # -- dispatch all ops (sequential or parallel) --
+        total_ops = len(operations)
+        if parallel:
+            op_results: List[Dict[str, Any]] = await asyncio.gather(
+                *(_dispatch_op(i, op) for i, op in enumerate(operations, 1)),
+            )
+            # Emit progress for all completed ops at once (parallel)
+            for idx, op_result in enumerate(op_results):
+                await self._event_bus.publish(batch_progress_event(
+                    workflow_id=workflow.workflow_id,
+                    task_id=parent_node.task_id,
+                    agent_id=parent_node.agent_id,
+                    batch_tool_call_id=tool_call.id,
+                    total_ops=total_ops,
+                    completed_ops=idx + 1,
+                    current_op=op_result,
+                ))
+        else:
+            op_results = []
+            for i, op in enumerate(operations, 1):
+                op_result = await _dispatch_op(i, op)
+                op_results.append(op_result)
+                # Emit progress after each op (sequential)
+                await self._event_bus.publish(batch_progress_event(
+                    workflow_id=workflow.workflow_id,
+                    task_id=parent_node.task_id,
+                    agent_id=parent_node.agent_id,
+                    batch_tool_call_id=tool_call.id,
+                    total_ops=total_ops,
+                    completed_ops=len(op_results),
+                    current_op=op_result,
+                ))
+
+        # -- auto-wait for spawned agents (D3) --
+        spawned_task_ids: List[str] = []
+        spawn_op_indices: List[int] = []
+        for idx, op_result in enumerate(op_results):
+            if op_result.get("tool") == "spawn_agent" and op_result.get("success"):
+                result_payload = op_result.get("result", {})
+                if isinstance(result_payload, str):
+                    try:
+                        result_payload = json.loads(result_payload)
+                    except (json.JSONDecodeError, TypeError):
+                        result_payload = {}
+                task_id = result_payload.get("task_id") if isinstance(result_payload, dict) else None
+                if task_id:
+                    spawned_task_ids.append(task_id)
+                    spawn_op_indices.append(idx)
+
+        if spawned_task_ids:
+            wait_call = ToolCall(
+                id=f"{tool_call.id}::auto_wait",
+                name="wait_for_agents",
+                arguments={"task_ids": spawned_task_ids, "detail_level": "full"},
+            )
+            wait_result = await self._handle_wait_for_agents(
+                wait_call, parent_node, workflow, trace_store,
+                roles_description, wf_store,
+            )
+            if wait_result.success:
+                try:
+                    agent_outputs = json.loads(wait_result.content)
+                except (json.JSONDecodeError, TypeError):
+                    agent_outputs = {}
+                # agent_outputs is keyed by task_id
+                for i, idx in enumerate(spawn_op_indices):
+                    tid = spawned_task_ids[i]
+                    if isinstance(agent_outputs, dict) and tid in agent_outputs:
+                        op_results[idx]["result"] = agent_outputs[tid]
+                    op_results[idx]["auto_waited"] = True
+            else:
+                for idx in spawn_op_indices:
+                    op_results[idx]["wait_error"] = wait_result.error
+                    op_results[idx]["auto_waited"] = False
+
+        # Build final response
+        any_success = any(r.get("success") for r in op_results)
+        return ToolResult(
+            tool_call_id=tool_call.id,
+            success=any_success,
+            content=json.dumps(op_results, indent=2, default=str),
+            error=None if any_success else "All operations failed.",
+        )
+
+    # -----------------------------------------------------------------------
+    # Agent lifecycle tools
+    # -----------------------------------------------------------------------
+
     async def _handle_spawn_agent(
         self,
         tool_call: ToolCall,
@@ -553,15 +874,17 @@ class Orchestrator:
         trace_store: TraceStore,
         roles_description: str,
         wf_store: Optional[WorkflowFileStore] = None,
+        **_kw: Any,
     ) -> ToolResult:
         """Handle spawn_agent tool call.
 
         Launches the child agent as a background ``asyncio.Task`` and returns
         immediately with the child's ``task_id``.  The parent can continue
         working (or spawn more children) and later call ``wait_for_agents``
-        to collect results.
+        to collect results.  By default blocks until the child finishes
+        and returns the full output inline (``blocking=true``).
         """
-        args = tool_call.arguments
+        args = _normalise_keys(tool_call.arguments)
         role = args.get("role", "")
         sub_role = args.get("sub_role")
         task_description = args.get("task_description", "")
@@ -618,6 +941,54 @@ class Orchestrator:
                        f"reached. Wait for existing agents to complete first.",
             )
 
+        # Same-role spawn policy check
+        description = args.get("description", "")
+        parent_role = (parent_node.config.role, parent_node.config.sub_role)
+        child_role_tuple = (role, sub_role)
+        same_role = parent_role == child_role_tuple
+        if same_role:
+            policy = self._policies_config.same_role_spawn_policy
+            if policy == SpawnPolicy.DENY:
+                await self._emit_spawn_validation_event(
+                    workflow, parent_node, role, sub_role,
+                    task_description, description,
+                    decision="denied",
+                    reason="Same-role spawning is blocked by policy.",
+                    policy_mode="deny",
+                )
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    success=False,
+                    content="",
+                    error=(
+                        "Cannot spawn an agent with the same role/sub_role "
+                        "as yourself. Perform the task directly instead of "
+                        "delegating to a clone."
+                    ),
+                )
+            elif policy == SpawnPolicy.CONSULT:
+                decision, reasoning = await self._consult_on_spawn(
+                    parent_node, workflow, role, sub_role,
+                    task_description, trace_store,
+                )
+                await self._emit_spawn_validation_event(
+                    workflow, parent_node, role, sub_role,
+                    task_description, description,
+                    decision=decision, reason=reasoning,
+                    policy_mode="consult",
+                )
+                if decision == "denied":
+                    return ToolResult(
+                        tool_call_id=tool_call.id,
+                        success=False,
+                        content="",
+                        error=(
+                            f"Spawn denied by consultant: {reasoning} "
+                            f"Perform the task directly."
+                        ),
+                    )
+            # SpawnPolicy.WARN — fall through; warning injected in ToolResult below
+
         # Resolve child config
         child_config = self._resolve_agent_config(role, sub_role)
         if not child_config.system_prompt and not self._domain_adapter:
@@ -655,6 +1026,7 @@ class Orchestrator:
             config=child_config,
             budget=child_budget,
             depth=parent_node.depth + 1,
+            description=description,
         )
         workflow.agent_tree[child_node.task_id] = child_node
         parent_node.children.append(child_node.task_id)
@@ -731,6 +1103,7 @@ class Orchestrator:
             budget=child_budget,
             trace_snapshot=trace_store.get_snapshot(child_node.task_id),
             effort_level=child_effort,
+            direct_answer_schema_policy=child_da_policy,
         )
 
         # Sub-agents get limited review cycles to avoid costly retry loops.
@@ -803,6 +1176,10 @@ class Orchestrator:
             agent_file_store=child_file_store,
             review_mode=child_review_mode,
             effort_level=child_effort,
+            output_validator=self._output_validator,
+            adaptive_config=self._adaptive_config,
+            phase_config=child_phase_config if self._phase_config else None,
+            summarizer=self._summarizer,
         )
 
         # Launch child execution as a background task so the parent can
@@ -814,9 +1191,9 @@ class Orchestrator:
                     input=child_input,
                     node=child_node,
                     workflow=workflow,
-                    on_orchestrator_tool=lambda tc: self._handle_orchestrator_tool(
+                    on_orchestrator_tool=lambda tc, te: self._handle_orchestrator_tool(
                         tc, child_node, workflow, trace_store, roles_description,
-                        wf_store,
+                        wf_store, tool_executor=te,
                     ),
                 )
                 _child_success = output.status in ("completed", "degraded")
@@ -891,6 +1268,75 @@ class Orchestrator:
         )
         self._pending_tasks[child_node.task_id] = task
 
+        # Emit spawn_started so the UI can show the agent immediately
+        # (before the blocking await delays the tool_executed event).
+        blocking = args.get("blocking", True)
+        await self._event_bus.publish(spawn_started_event(
+            workflow_id=workflow.workflow_id,
+            task_id=parent_node.task_id,
+            agent_id=parent_node.agent_id,
+            child_task_id=child_node.task_id,
+            child_role=role,
+            child_sub_role=sub_role,
+            child_description=description,
+            blocking=blocking,
+        ))
+
+        # Same-role warning (emitted regardless of blocking mode)
+        warn_suffix = ""
+        if same_role and self._policies_config.same_role_spawn_policy == SpawnPolicy.WARN:
+            warn_suffix = (
+                "\n\n⚠ SAME-ROLE SPAWN WARNING: You spawned an agent with "
+                "the same role as yourself. Next time, consider doing the "
+                "work directly unless you have a specific reason to delegate "
+                "(e.g., parallel sub-tasks or context window management)."
+            )
+            await self._emit_spawn_validation_event(
+                workflow, parent_node, role, sub_role,
+                task_description, description,
+                decision="warned",
+                reason="Same-role spawn proceeded with warning.",
+                policy_mode="warn",
+            )
+
+        # Blocking mode (default): await child completion and return full output
+        if blocking:
+            try:
+                await task
+            except Exception as exc:
+                logger.error(
+                    f"Blocking spawn_agent child {child_node.task_id[:8]} "
+                    f"raised: {exc}",
+                    exc_info=True,
+                )
+                # _run_child stores a failed AgentOutput on child_node,
+                # so we fall through to _collect_child_result below.
+
+            # Collect and return the child result (same path as wait_for_agents)
+            result_dict = self._collect_child_result(
+                child_node.task_id, workflow,
+            )
+            child_status = result_dict.get("status", "failed")
+            child_succeeded = child_status in ("completed", "degraded")
+            if warn_suffix:
+                result_dict["warn"] = warn_suffix
+
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                success=child_succeeded,
+                content=json.dumps(result_dict, default=str),
+                error=None if child_succeeded else (
+                    f"Spawned agent {role}/{sub_role} finished with "
+                    f"status '{child_status}'."
+                ),
+            )
+
+        # Non-blocking mode: return immediately with task_id
+        spawn_msg = (
+            f"Agent spawned and running in the background. "
+            f"Use wait_for_agents with task_id '{child_node.task_id}' "
+            f"to collect results when ready.{warn_suffix}"
+        )
         return ToolResult(
             tool_call_id=tool_call.id,
             success=True,
@@ -899,14 +1345,118 @@ class Orchestrator:
                 "agent_id": child_config.agent_id,
                 "role": role,
                 "sub_role": sub_role,
+                "description": description,
                 "status": "spawned",
-                "message": (
-                    f"Agent spawned and running in the background. "
-                    f"Use wait_for_agents with task_id '{child_node.task_id}' "
-                    f"to collect results when ready."
-                ),
+                "message": spawn_msg,
             }),
         )
+
+    # -----------------------------------------------------------------------
+    # Spawn policy helpers
+    # -----------------------------------------------------------------------
+
+    async def _emit_spawn_validation_event(
+        self,
+        workflow: WorkflowExecution,
+        parent_node: AgentNode,
+        child_role: str,
+        child_sub_role: Optional[str],
+        child_task: str,
+        child_description: str,
+        decision: str,
+        reason: str,
+        policy_mode: str,
+    ) -> None:
+        """Emit a spawn_validation event for UI observability."""
+        event = spawn_validation_event(
+            workflow_id=workflow.workflow_id,
+            task_id=parent_node.task_id,
+            agent_id=parent_node.agent_id,
+            child_role=child_role,
+            child_sub_role=child_sub_role,
+            child_task=child_task,
+            policy_mode=policy_mode,
+            decision=decision,
+            reason=reason,
+        )
+        await self._event_bus.publish(event)
+
+    async def _consult_on_spawn(
+        self,
+        parent_node: AgentNode,
+        workflow: WorkflowExecution,
+        child_role: str,
+        child_sub_role: Optional[str],
+        child_task_description: str,
+        trace_store: TraceStore,
+    ) -> tuple:
+        """Run a Level 0 consultant to validate a same-role spawn.
+
+        Returns (decision, reasoning) where decision is "approved" or "denied".
+        """
+        from pathlib import Path
+
+        # Build lean context packet
+        # Approximate tools called from trace children count + budget usage
+        entry = trace_store.get_entry(parent_node.task_id)
+        tools_called = len(entry.children) if entry else 0
+        budget_remaining_pct = 100.0
+        if parent_node.budget.max_tokens and parent_node.budget_consumed.tokens:
+            budget_remaining_pct = max(
+                0.0,
+                (1.0 - parent_node.budget_consumed.tokens / parent_node.budget.max_tokens) * 100,
+            )
+
+        # Load prompts from domain_agents/
+        prompts_dir = Path(__file__).parent / "domain_agents" / "consultant"
+        try:
+            base_prompt = (prompts_dir / "base.md").read_text(encoding="utf-8")
+            case_template = (prompts_dir / "cases" / "same_role_spawn.md").read_text(encoding="utf-8")
+        except FileNotFoundError as e:
+            logger.warning(f"Consultant prompt not found: {e}; defaulting to approved")
+            return ("approved", f"Consultant prompts missing ({e}); defaulting to approved.")
+
+        user_message = case_template.format(
+            parent_role=parent_node.config.role or "(none)",
+            parent_sub_role=parent_node.config.sub_role or "(none)",
+            parent_task=(getattr(parent_node.config, 'task_description', '') or '')[:300],
+            parent_phase=parent_node.current_phase.name if parent_node.current_phase else "unknown",
+            parent_iteration=getattr(parent_node, '_iteration_count', '?'),
+            tools_called_count=tools_called,
+            budget_remaining_pct=f"{budget_remaining_pct:.0f}%",
+            child_role=child_role,
+            child_sub_role=child_sub_role or "(none)",
+            child_task=child_task_description[:300],
+        )
+
+        # Single LLM call — no framework overhead
+        model = self._policies_config.consultant_model or parent_node.config.model or "default"
+        try:
+            from .core_types import Message, MessageRole, ModelConfig as MC
+            response = await self._llm.chat_with_tools(
+                messages=[
+                    Message(role=MessageRole.SYSTEM, content=base_prompt),
+                    Message(role=MessageRole.USER, content=user_message),
+                ],
+                tools=[],
+                model=model,
+                model_config=MC(
+                    temperature=self._policies_config.consultant_temperature,
+                    max_tokens=self._policies_config.consultant_max_tokens,
+                ),
+            )
+            text = (response.content or "").strip()
+            if text.lower().startswith("approved"):
+                return ("approved", text)
+            else:
+                return ("denied", text)
+        except Exception as e:
+            logger.warning(f"Consultant call failed: {e}; defaulting to approved")
+            return ("approved", f"Consultant unavailable ({e}); defaulting to approved.")
+
+    # -----------------------------------------------------------------------
+    # wait_for_agents
+    # -----------------------------------------------------------------------
 
     async def _handle_wait_for_agents(
         self,
@@ -916,14 +1466,22 @@ class Orchestrator:
         trace_store: TraceStore,
         roles_description: str,
         wf_store: Optional[WorkflowFileStore] = None,
+        **_kw: Any,
     ) -> ToolResult:
         """Handle wait_for_agents tool call.
 
         Awaits all requested child tasks concurrently via ``asyncio.gather``.
         Tasks that have already finished are collected immediately.
         A configurable timeout prevents indefinite blocking.
+
+        Honors a ``detail_level`` argument (default ``"summary"``) that
+        controls how verbose each per-agent payload is. Compact summaries
+        slash synthesis cost when many children are spawned in parallel.
         """
         task_ids = tool_call.arguments.get("task_ids", [])
+        detail_level = str(tool_call.arguments.get("detail_level", "summary")).lower()
+        if detail_level not in ("summary", "full"):
+            detail_level = "summary"
 
         if not task_ids:
             return ToolResult(
@@ -964,10 +1522,17 @@ class Orchestrator:
                 )
 
         # Collect results for all requested children
-        results = {
+        raw_results = {
             tid: self._collect_child_result(tid, workflow)
             for tid in task_ids
         }
+        if detail_level == "summary":
+            results = {
+                tid: self._summarize_child_result(r)
+                for tid, r in raw_results.items()
+            }
+        else:
+            results = raw_results
 
         if timed_out:
             return ToolResult(
@@ -1058,6 +1623,147 @@ class Orchestrator:
             }
         return {"task_id": task_id, "error": "Agent not found"}
 
+    @staticmethod
+    def _summarize_child_result(result: Dict[str, Any]) -> Dict[str, Any]:
+        """Compact a full AgentOutput dict to its lightweight summary view.
+
+        Keeps the fields a parent agent typically needs to decide whether
+        to drill down: status, role, prose summary, finding counts,
+        token usage, and any error info. Drops the full findings dict and
+        phase outputs — those can be fetched on demand via
+        ``get_agent_phase_output`` if the parent decides they're worth
+        the extra tokens.
+        """
+        if not isinstance(result, dict):
+            return result
+
+        summary: Dict[str, Any] = {
+            "task_id": result.get("task_id"),
+            "status": result.get("status"),
+            "role": result.get("role"),
+            "summary": result.get("summary"),
+            "_detail_level": "summary",
+        }
+        sub_role = result.get("sub_role")
+        if sub_role:
+            summary["sub_role"] = sub_role
+
+        # Finding counts (drop the bulky structured data)
+        findings = result.get("findings")
+        if isinstance(findings, dict) and findings:
+            counts: Dict[str, int] = {}
+            for k, v in findings.items():
+                if isinstance(v, list):
+                    counts[k] = len(v)
+                elif isinstance(v, dict):
+                    counts[k] = len(v)
+                else:
+                    counts[k] = 1
+            summary["finding_counts"] = counts
+
+        # Recommendations stay (usually a short list)
+        if result.get("recommendations"):
+            summary["recommendations"] = result["recommendations"]
+
+        # Token usage (small but useful for cost tracking)
+        if "token_usage" in result:
+            summary["token_usage"] = result["token_usage"]
+
+        # Error info (always retain for failure handling)
+        if result.get("errors"):
+            summary["errors"] = result["errors"]
+        if result.get("failure_type"):
+            summary["failure_type"] = result["failure_type"]
+
+        # Phase metadata (lightweight: counts + names, not contents)
+        meta = result.get("execution_metadata") or {}
+        phase_outputs = meta.get("phase_outputs") or {}
+        if phase_outputs:
+            summary["available_phase_outputs"] = list(phase_outputs.keys())
+
+        return summary
+
+    async def _handle_get_agent_phase_output(
+        self,
+        tool_call: ToolCall,
+        parent_node: AgentNode,
+        workflow: WorkflowExecution,
+        trace_store: TraceStore,
+        roles_description: str,
+        wf_store: Optional[WorkflowFileStore] = None,
+        **_kw: Any,
+    ) -> ToolResult:
+        """Return the full text of one phase for one completed child."""
+        task_id = tool_call.arguments.get("task_id", "")
+        phase = str(tool_call.arguments.get("phase", "")).lower().strip()
+
+        if not task_id or not phase:
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                success=False,
+                content="",
+                error="get_agent_phase_output requires both 'task_id' and 'phase'.",
+            )
+        if phase not in ("plan", "act", "review", "report"):
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                success=False,
+                content="",
+                error=f"Unknown phase '{phase}'. Expected plan|act|review|report.",
+            )
+
+        child = workflow.agent_tree.get(task_id)
+        if not child:
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                success=False,
+                content="",
+                error=f"No agent found with task_id {task_id}.",
+            )
+        if child.status == AgentStatus.RUNNING:
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                success=False,
+                content="",
+                error=f"Agent {task_id} is still running. Use wait_for_agents first.",
+            )
+        if child.result is None:
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                success=False,
+                content="",
+                error=f"Agent {task_id} has no result.",
+            )
+
+        phase_outputs = (
+            child.result.execution_metadata.phase_outputs or {}
+        )
+        text = phase_outputs.get(phase)
+        if not text:
+            available = ", ".join(phase_outputs.keys()) or "(none)"
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                success=False,
+                content="",
+                error=(
+                    f"Phase '{phase}' has no recorded output for agent {task_id}. "
+                    f"Available phases: {available}."
+                ),
+            )
+
+        payload = {
+            "task_id": task_id,
+            "role": child.config.role,
+            "sub_role": child.config.sub_role,
+            "phase": phase,
+            "output": text,
+        }
+        return ToolResult(
+            tool_call_id=tool_call.id,
+            success=True,
+            content=json.dumps(payload, indent=2, default=str),
+        )
+
     async def _handle_get_agent_result(
         self,
         tool_call: ToolCall,
@@ -1066,6 +1772,7 @@ class Orchestrator:
         trace_store: TraceStore,
         roles_description: str,
         wf_store: Optional[WorkflowFileStore] = None,
+        **_kw: Any,
     ) -> ToolResult:
         """Handle get_agent_result tool call."""
         task_id = tool_call.arguments.get("task_id", "")
@@ -1109,6 +1816,7 @@ class Orchestrator:
         trace_store: TraceStore,
         roles_description: str,
         wf_store: Optional[WorkflowFileStore] = None,
+        **_kw: Any,
     ) -> ToolResult:
         """Handle get_agent_results_all tool call."""
         results = {}
@@ -1153,6 +1861,7 @@ class Orchestrator:
         trace_store: TraceStore,
         roles_description: str,
         wf_store: Optional[WorkflowFileStore] = None,
+        **_kw: Any,
     ) -> ToolResult:
         """Handle send_message tool call."""
         args = tool_call.arguments
@@ -1217,6 +1926,7 @@ class Orchestrator:
         trace_store: TraceStore,
         roles_description: str,
         wf_store: Optional[WorkflowFileStore] = None,
+        **_kw: Any,
     ) -> ToolResult:
         """Handle read_messages tool call."""
         cursor = self._message_cursors.get(parent_node.task_id, 0)
@@ -1251,6 +1961,7 @@ class Orchestrator:
         trace_store: TraceStore,
         roles_description: str,
         wf_store: Optional[WorkflowFileStore] = None,
+        **_kw: Any,
     ) -> ToolResult:
         """Handle set_shared_state tool call."""
         args = tool_call.arguments
@@ -1296,6 +2007,7 @@ class Orchestrator:
         trace_store: TraceStore,
         roles_description: str,
         wf_store: Optional[WorkflowFileStore] = None,
+        **_kw: Any,
     ) -> ToolResult:
         """Handle get_shared_state tool call."""
         key = tool_call.arguments.get("key")

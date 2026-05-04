@@ -168,6 +168,33 @@ def phase_iteration_limit(
     )
 
 
+def phase_injection(
+    workflow_id: str, task_id: str, agent_id: str,
+    phase: str, kind: str, content: str,
+    iteration: int | None = None,
+) -> FrameworkEvent:
+    """Emitted when the framework injects a user-role message into the
+    agent's conversation mid-phase (iteration advisories, warnings,
+    budget nudges, stall warnings, mandatory-tool nudges, circuit-breaker
+    messages, or the review-retry feedback passed via ``extra_context``).
+
+    ``kind`` is a short machine-readable label (e.g.
+    ``iteration_advisory``, ``iteration_warning``, ``progress``,
+    ``budget_warning``, ``stall_warning``, ``tool_warning``,
+    ``tool_disabled``, ``mandatory_nudge``, ``extra_context``).
+    """
+    data: Dict[str, Any] = {
+        "phase": phase, "kind": kind, "content": content,
+    }
+    if iteration is not None:
+        data["iteration"] = iteration
+    return FrameworkEvent(
+        workflow_id=workflow_id, task_id=task_id, agent_id=agent_id,
+        event_type="phase_injection",
+        data=data,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Execution events
 # ---------------------------------------------------------------------------
@@ -179,6 +206,10 @@ def llm_call_completed(
     response_content: Optional[str] = None,
     tool_calls: Optional[List[Dict[str, Any]]] = None,
     cumulative_tokens: int = 0,
+    model: Optional[str] = None,
+    cache_read_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    cost: Optional[float] = None,
 ) -> FrameworkEvent:
     data: Dict[str, Any] = {
         "phase": phase, "iteration": iteration,
@@ -191,6 +222,19 @@ def llm_call_completed(
         data["tool_calls"] = tool_calls
     if cumulative_tokens > 0:
         data["cumulative_tokens"] = cumulative_tokens
+    if model is not None:
+        data["model"] = model
+    # Cache metrics — emitted only when non-zero so the event payload
+    # stays compact when caching is disabled or unsupported.
+    if cache_read_input_tokens:
+        data["cache_read_input_tokens"] = cache_read_input_tokens
+    if cache_creation_input_tokens:
+        data["cache_creation_input_tokens"] = cache_creation_input_tokens
+    # The provider-aware cost computed by CostConfig (cache-discounted
+    # when applicable). Subscribers can use this directly instead of
+    # re-deriving cost from raw tokens.
+    if cost is not None:
+        data["cost"] = cost
     return FrameworkEvent(
         workflow_id=workflow_id, task_id=task_id, agent_id=agent_id,
         event_type="llm_call_completed",
@@ -291,4 +335,90 @@ def budget_exceeded(
         workflow_id=workflow_id, task_id=task_id, agent_id=agent_id,
         event_type="budget_exceeded",
         data={"reason": reason},
+    )
+
+
+def batch_started(
+    workflow_id: str, task_id: str, agent_id: str,
+    batch_tool_call_id: str,
+    operations: List[Dict[str, Any]],
+) -> FrameworkEvent:
+    """Emitted when batch_operations begins — before any ops execute."""
+    return FrameworkEvent(
+        workflow_id=workflow_id, task_id=task_id, agent_id=agent_id,
+        event_type="batch_started",
+        data={
+            "batch_tool_call_id": batch_tool_call_id,
+            "total_ops": len(operations),
+            "operations": [
+                {"op": op.get("op", ""), "index": i}
+                for i, op in enumerate(operations, 1)
+            ],
+        },
+    )
+
+
+def batch_progress(
+    workflow_id: str, task_id: str, agent_id: str,
+    batch_tool_call_id: str,
+    total_ops: int,
+    completed_ops: int,
+    current_op: Dict[str, Any],
+) -> FrameworkEvent:
+    """Emitted each time an op inside batch_operations completes."""
+    return FrameworkEvent(
+        workflow_id=workflow_id, task_id=task_id, agent_id=agent_id,
+        event_type="batch_progress",
+        data={
+            "batch_tool_call_id": batch_tool_call_id,
+            "total_ops": total_ops,
+            "completed_ops": completed_ops,
+            "op": current_op,
+        },
+    )
+
+
+def spawn_started(
+    workflow_id: str, task_id: str, agent_id: str,
+    child_task_id: str,
+    child_role: str,
+    child_sub_role: Optional[str],
+    child_description: str,
+    blocking: bool,
+) -> FrameworkEvent:
+    """Emitted when spawn_agent initiates a child — before blocking await."""
+    return FrameworkEvent(
+        workflow_id=workflow_id, task_id=task_id, agent_id=agent_id,
+        event_type="spawn_started",
+        data={
+            "child_task_id": child_task_id,
+            "child_role": child_role,
+            "child_sub_role": child_sub_role,
+            "child_description": child_description,
+            "blocking": blocking,
+        },
+    )
+
+
+def spawn_validation(
+    workflow_id: str, task_id: str, agent_id: str,
+    child_role: str,
+    child_sub_role: Optional[str],
+    child_task: str,
+    policy_mode: str,
+    decision: str,
+    reason: str,
+) -> FrameworkEvent:
+    """Emitted when a same-role spawn attempt triggers policy evaluation."""
+    return FrameworkEvent(
+        workflow_id=workflow_id, task_id=task_id, agent_id=agent_id,
+        event_type="spawn_validation",
+        data={
+            "child_role": child_role,
+            "child_sub_role": child_sub_role,
+            "child_task": child_task[:200],
+            "policy_mode": policy_mode,
+            "decision": decision,
+            "reason": reason,
+        },
     )

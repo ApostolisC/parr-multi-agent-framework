@@ -278,3 +278,51 @@ class DocumentSearchProvider(Protocol):
                 - metadata: dict
         """
         ...
+
+
+# ---------------------------------------------------------------------------
+# Text Summarizer
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class TextSummarizer(Protocol):
+    """
+    Interface for a small text summarizer.
+
+    Implementations are typically thin wrappers around a cheap LLM
+    (e.g., gpt-4.1-nano) that compress long blocks of text down to a
+    short, faithful prose summary. The framework uses this for
+    summarize-on-read collection reads — when an agent calls
+    ``get_collection(name, summarize=True)``, the framework hands the
+    full collection text to the summarizer and returns the summary
+    instead of the raw items.
+
+    Implementations MUST be safe to call from a tool handler (no
+    blocking I/O on the calling thread, no exceptions on transient
+    failures — return None or raise so the framework can fall back
+    to the full text).
+    """
+
+    async def summarize(
+        self,
+        text: str,
+        instructions: Optional[str] = None,
+    ) -> str:
+        """
+        Produce a faithful, terse prose summary of ``text``.
+
+        Args:
+            text: The text to summarize. May be long; the implementation
+                is responsible for handling its own context window.
+            instructions: Optional caller-supplied directive describing
+                what the summary should preserve (e.g. "keep all
+                quantified findings and source citations").
+
+        Returns:
+            A summary string. The framework treats this as the
+            authoritative replacement for the original text — the
+            implementation should aim for the smallest summary that
+            preserves the context the caller asked for, with no hard
+            word cap.
+        """
+        ...

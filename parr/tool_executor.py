@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, List, Optional
 from jsonschema import ValidationError as JsonSchemaValidationError
 from jsonschema import validate as jsonschema_validate
 
-from .core_types import Phase, ToolCall, ToolContext, ToolDef, ToolMiddleware, ToolResult
+from .core_types import Phase, ToolCall, ToolContext, ToolDef, ToolMiddleware, ToolResult, strip_heavy_fields_in_place
 from .tool_registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -155,6 +155,12 @@ class ToolExecutor:
                 error=f"Tool '{tool_call.name}' has no handler registered.",
             )
 
+        # --- KEY NORMALISATION ---
+        # LLMs sometimes emit camelCase keys (e.g. taskDescription) instead
+        # of the snake_case the schema expects. Normalise before validation.
+        from .core_types import normalise_keys
+        tool_call.arguments = normalise_keys(tool_call.arguments)
+
         # --- INPUT VALIDATION ---
         input_error = self._validate_input(tool_def, tool_call.arguments)
         if input_error:
@@ -238,6 +244,17 @@ class ToolExecutor:
                     success=True,
                     content=serialized,
                 )
+
+                # --- STRIP HEAVY FIELDS ---
+                effective_strip = active_tool_call.arguments.get(
+                    "strip_input_after_dispatch",
+                    tool_def.strip_input_after_dispatch,
+                )
+                if effective_strip and tool_def.heavy_input_fields:
+                    strip_heavy_fields_in_place(
+                        active_tool_call.arguments,
+                        tool_def.heavy_input_fields,
+                    )
 
                 # --- MIDDLEWARE: POST-CALL ---
                 return await self._run_post_call_chain(
@@ -395,11 +412,13 @@ class ToolExecutor:
         """
         Serialize handler output to string for the LLM.
 
-        Always uses json.dumps for dict/list results to ensure valid JSON
-        that can be reliably parsed downstream. Falls back to str() only
-        for scalar types and custom objects.
+        When the tool declares an ``output_schema``, dict/list results are
+        rendered as JSON so the LLM can reliably parse them. Without a
+        declared schema, ``str()`` is used to preserve the handler's
+        natural Python repr (matches the documented contract — see
+        ``tests/test_tool_executor.py::test_dict_without_output_schema_uses_str``).
         """
-        if isinstance(result, (dict, list)):
+        if isinstance(result, (dict, list)) and tool_def.output_schema is not None:
             return json.dumps(result, ensure_ascii=False, default=str)
         return str(result)
 
@@ -407,22 +426,34 @@ class ToolExecutor:
     # Handler dispatch
     # -------------------------------------------------------------------
 
+    # Framework-injected meta-parameters that must be stripped before
+    # calling tool handlers. These are consumed by the framework itself
+    # (e.g., for post-dispatch stripping) and should never reach the
+    # actual handler function.
+    _FRAMEWORK_META_PARAMS = frozenset({"strip_input_after_dispatch"})
+
     async def _call_handler(
         self, tool_def: ToolDef, arguments: Dict[str, Any]
     ) -> Any:
         """Call the tool handler with timeout."""
         timeout_s = tool_def.timeout_ms / 1000.0
 
+        # Strip framework meta-parameters before calling handler
+        clean_args = {
+            k: v for k, v in arguments.items()
+            if k not in self._FRAMEWORK_META_PARAMS
+        }
+
         handler = tool_def.handler
         if inspect.iscoroutinefunction(handler):
             result = await asyncio.wait_for(
-                handler(**arguments), timeout=timeout_s
+                handler(**clean_args), timeout=timeout_s
             )
         else:
             # Sync handlers run in executor to avoid blocking
             loop = asyncio.get_running_loop()
             result = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: handler(**arguments)),
+                loop.run_in_executor(None, lambda: handler(**clean_args)),
                 timeout=timeout_s,
             )
 

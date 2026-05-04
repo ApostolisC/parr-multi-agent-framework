@@ -60,7 +60,9 @@ from ..core_types import (
     ModelConfig,
     ModelPricing,
     Phase,
+    PoliciesConfig,
     SimpleQueryBypassConfig,
+    SpawnPolicy,
     StallDetectionConfig,
     ToolDef,
 )
@@ -99,6 +101,10 @@ class ConfigBundle:
         default_factory=SimpleQueryBypassConfig
     )
     adaptive_flow: Optional[AdaptiveFlowConfig] = None
+    # Global default for explicit prompt-cache markers (Anthropic-style).
+    # Per-role overrides live on AgentConfig.model_config.prompt_caching.
+    prompt_caching: bool = True
+    policies_config: PoliciesConfig = field(default_factory=PoliciesConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +296,7 @@ def build_llm_from_provider_config(
     model: str,
     cost_config: Optional[CostConfig] = None,
     llm_rate_limit: Optional[LLMRateLimitConfig] = None,
+    prompt_caching: bool = False,
 ) -> Any:
     """
     Create a ToolCallingLLM instance from a resolved ProviderConfig.
@@ -299,6 +306,9 @@ def build_llm_from_provider_config(
         model: Model name or deployment name.
         cost_config: Optional pricing config for cost tracking.
         llm_rate_limit: Optional queue/rate-limit settings for all LLM calls.
+        prompt_caching: Global default for explicit cache markers
+            (Anthropic only). Per-role overrides flow through
+            ModelConfig.prompt_caching at call time.
 
     Returns:
         A ToolCallingLLM-compatible adapter instance.
@@ -310,6 +320,7 @@ def build_llm_from_provider_config(
         model=model,
         cost_config=cost_config,
         llm_rate_limit=llm_rate_limit,
+        prompt_caching=prompt_caching,
         **provider_config.kwargs,
     )
 
@@ -378,7 +389,15 @@ def load_config(
     raw_llm_rate_limit = budget_data.get("llm_rate_limit", {})
     raw_simple_query_bypass = budget_data.get("simple_query_bypass", {})
     raw_adaptive_flow = budget_data.get("adaptive_flow", {})
+    raw_prompt_caching = budget_data.get("prompt_caching", {})
     raw_roles = roles_data.get("roles", {})
+
+    # -- Policies (optional file) -------------------------------------------
+    policies_path = config_dir / "policies.yaml"
+    raw_policies: Dict[str, Any] = {}
+    if policies_path.is_file():
+        policies_data = _load_yaml(policies_path)
+        raw_policies = policies_data.get("policies", {})
 
     # -- Resolve tools (declarative vs legacy) -------------------------------
     tools_yaml_path = config_dir / "tools.yaml"
@@ -441,6 +460,16 @@ def load_config(
     # -- Build adaptive flow config ------------------------------------------
     adaptive_flow = _build_adaptive_flow_config(raw_adaptive_flow)
 
+    # -- Resolve global prompt_caching default -------------------------------
+    # Accepts either a bool shorthand (`prompt_caching: true`) or a mapping
+    # with `enabled: true` for forward-compat with future settings.
+    if isinstance(raw_prompt_caching, bool):
+        prompt_caching_default = raw_prompt_caching
+    elif isinstance(raw_prompt_caching, dict):
+        prompt_caching_default = bool(raw_prompt_caching.get("enabled", True))
+    else:
+        prompt_caching_default = True
+
     # -- Build DomainAdapter -------------------------------------------------
     domain_adapter = _build_domain_adapter(
         config_dir=config_dir,
@@ -468,6 +497,8 @@ def load_config(
         + (", adaptive_flow=enabled" if adaptive_flow and adaptive_flow.enabled else "")
     )
 
+    policies_config = _build_policies_config(raw_policies)
+
     return ConfigBundle(
         domain_adapter=domain_adapter,
         cost_config=cost_config,
@@ -478,6 +509,8 @@ def load_config(
         llm_rate_limit=llm_rate_limit,
         simple_query_bypass=simple_query_bypass,
         adaptive_flow=adaptive_flow,
+        prompt_caching=prompt_caching_default,
+        policies_config=policies_config,
     )
 
 
@@ -485,20 +518,109 @@ def load_config(
 # Builder helpers
 # ---------------------------------------------------------------------------
 
+def _build_policies_config(raw: Dict[str, Any]) -> PoliciesConfig:
+    """Build PoliciesConfig from parsed policies dict."""
+    policy_str = raw.get("same_role_spawn_policy", "warn")
+    try:
+        policy = SpawnPolicy(policy_str)
+    except ValueError:
+        logger.warning(
+            "Unknown same_role_spawn_policy '%s'; defaulting to 'warn'.",
+            policy_str,
+        )
+        policy = SpawnPolicy.WARN
+    return PoliciesConfig(
+        same_role_spawn_policy=policy,
+        consultant_model=raw.get("consultant_model"),
+        consultant_max_tokens=int(raw.get("consultant_max_tokens", 512)),
+        consultant_temperature=float(raw.get("consultant_temperature", 0.1)),
+    )
+
+
 def _build_cost_config(raw_models: Dict[str, Any]) -> CostConfig:
-    """Build CostConfig from parsed models dict."""
+    """Build CostConfig from parsed models dict.
+
+    Optional fields ``cached_input_price_per_1k`` and
+    ``cache_write_price_per_1k`` are loaded if present, otherwise left
+    as None — the cost calculator falls back to the full input price for
+    cached/written tokens in that case (pessimistic but safe).
+    """
     models: Dict[str, ModelPricing] = {}
     for name, pricing in raw_models.items():
+        cached_price = pricing.get("cached_input_price_per_1k")
+        write_price = pricing.get("cache_write_price_per_1k")
         models[name] = ModelPricing(
             input_price_per_1k=float(pricing.get("input_price_per_1k", 0.0)),
             output_price_per_1k=float(pricing.get("output_price_per_1k", 0.0)),
             context_window=int(pricing.get("context_window", 128000)),
+            cached_input_price_per_1k=(
+                float(cached_price) if cached_price is not None else None
+            ),
+            cache_write_price_per_1k=(
+                float(write_price) if write_price is not None else None
+            ),
         )
     return CostConfig(models=models)
 
 
 def _build_budget_config(raw_budget: Dict[str, Any]) -> BudgetConfig:
     """Build BudgetConfig from parsed budget dict."""
+    raw_snapshot_cap = raw_budget.get("snapshot_max_items_per_collection")
+    snapshot_cap: Optional[int]
+    if raw_snapshot_cap is None:
+        snapshot_cap = None
+    else:
+        try:
+            snapshot_cap = int(raw_snapshot_cap)
+            if snapshot_cap < 0:
+                snapshot_cap = None
+        except (TypeError, ValueError):
+            snapshot_cap = None
+
+    # ResultCacheMiddleware — accept either {enabled, scope, max_entries}
+    # mapping or a bool shorthand (true → defaults).
+    raw_rc = raw_budget.get("result_cache")
+    rc_enabled: Optional[bool] = None
+    rc_scope = "phase"
+    rc_max_entries: Optional[int] = 256
+    if isinstance(raw_rc, bool):
+        rc_enabled = raw_rc
+    elif isinstance(raw_rc, dict):
+        rc_enabled = bool(raw_rc.get("enabled", True))
+        scope_raw = str(raw_rc.get("scope", "phase")).strip().lower()
+        if scope_raw in ("phase", "agent"):
+            rc_scope = scope_raw
+        max_entries_raw = raw_rc.get("max_entries", 256)
+        if max_entries_raw is None:
+            rc_max_entries = None
+        else:
+            try:
+                rc_max_entries = int(max_entries_raw)
+                if rc_max_entries < 0:
+                    rc_max_entries = None
+            except (TypeError, ValueError):
+                rc_max_entries = 256
+
+    # Summarize-on-read — accept int (chars threshold) or {threshold_chars,
+    # default_instructions} mapping. 0 / negative / garbage → 0 (disabled).
+    raw_sor = raw_budget.get("summarize_on_read")
+    sor_threshold = 0
+    sor_default_instructions: Optional[str] = None
+    if isinstance(raw_sor, (int, float)):
+        try:
+            sor_threshold = max(0, int(raw_sor))
+        except (TypeError, ValueError):
+            sor_threshold = 0
+    elif isinstance(raw_sor, dict):
+        raw_t = raw_sor.get("threshold_chars", 0)
+        try:
+            sor_threshold = max(0, int(raw_t))
+        except (TypeError, ValueError):
+            sor_threshold = 0
+        di = raw_sor.get("default_instructions")
+        if isinstance(di, str) and di.strip():
+            sor_default_instructions = di.strip()
+
     return BudgetConfig(
         max_tokens=raw_budget.get("max_tokens"),
         max_cost=raw_budget.get("max_cost"),
@@ -512,6 +634,12 @@ def _build_budget_config(raw_budget: Dict[str, Any]) -> BudgetConfig:
         max_child_review_cycles=raw_budget.get("max_child_review_cycles"),
         context_soft_compaction_pct=raw_budget.get("context_soft_compaction_pct", 0.40),
         context_hard_truncation_pct=raw_budget.get("context_hard_truncation_pct", 0.65),
+        snapshot_max_items_per_collection=snapshot_cap,
+        result_cache_enabled=rc_enabled,
+        result_cache_scope=rc_scope,
+        result_cache_max_entries=rc_max_entries,
+        summarize_on_read_threshold_chars=sor_threshold,
+        default_summary_instructions=sor_default_instructions,
     )
 
 
@@ -615,6 +743,7 @@ def _build_domain_adapter(
             temperature=mc_raw.get("temperature", 0.7),
             top_p=mc_raw.get("top_p", 1.0),
             max_tokens=mc_raw.get("max_tokens", 4096),
+            prompt_caching=mc_raw.get("prompt_caching"),
         )
 
         # Build AgentConfig
@@ -700,6 +829,7 @@ def _register_sub_role(
             temperature=sr_mc_raw.get("temperature", parent_mc.get("temperature", 0.7)),
             top_p=sr_mc_raw.get("top_p", parent_mc.get("top_p", 1.0)),
             max_tokens=sr_mc_raw.get("max_tokens", parent_mc.get("max_tokens", 4096)),
+            prompt_caching=sr_mc_raw.get("prompt_caching", parent_mc.get("prompt_caching")),
         )
 
         config_overrides = AgentConfig(
@@ -837,6 +967,7 @@ def create_orchestrator_from_config(
     stream: bool = False,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    summarizer: Any = None,
 ) -> Any:
     """
     Load config and create a fully-wired Orchestrator in one step.
@@ -894,10 +1025,11 @@ def create_orchestrator_from_config(
                 model,
                 bundle.cost_config,
                 llm_rate_limit=bundle.llm_rate_limit,
+                prompt_caching=bundle.prompt_caching,
             )
             logger.info(
                 f"LLM auto-created: provider={provider_config.provider_type}, "
-                f"model={model}"
+                f"model={model}, prompt_caching={bundle.prompt_caching}"
             )
     elif bundle.llm_rate_limit and bundle.llm_rate_limit.enabled:
         from ..adapters.llm_rate_limiter import RateLimitedToolCallingLLM
@@ -916,4 +1048,6 @@ def create_orchestrator_from_config(
         stall_config=bundle.stall_config,
         simple_query_bypass=bundle.simple_query_bypass,
         adaptive_config=bundle.adaptive_flow,
+        summarizer=summarizer,
+        policies_config=bundle.policies_config,
     )
